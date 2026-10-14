@@ -2,15 +2,27 @@
 from __future__ import annotations
 
 import sys
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QCoreApplication, QTimer, Qt
-from PySide6.QtGui import QIcon
-from mechahub.ui.main_window import MainWindow
 from pathlib import Path
 from mechahub import __version__
 
 
 def main() -> int:
+    if '--apply-update' in sys.argv:
+        from mechahub.core.updates_install import run_update_helper
+        if len(sys.argv) != 3 or sys.argv[1] != '--apply-update':
+            return 1
+        return run_update_helper(Path(sys.argv[2]))
+    from mechahub.core.updates_install import cleanup_finished_stages
+    try:
+        cleanup_finished_stages()
+    except (OSError, ValueError):
+        pass
+    # The independent updater waits for this app to quit, so it must not load
+    # Qt or construct another application window before dispatching above.
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QCoreApplication, Qt
+    from PySide6.QtGui import QIcon
+    from mechahub.ui.main_window import MainWindow
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName('MechaHub')
@@ -36,6 +48,7 @@ def main() -> int:
 
 def _self_check(app: QApplication, window: MainWindow) -> None:
     """Exercise the packaged browser on local HTML, then exit with a status code."""
+    from PySide6.QtCore import QTimer
     timer = QTimer(window)
     timer.setSingleShot(True)
     completed = False

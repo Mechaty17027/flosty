@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 import os
 from pathlib import Path
+import time
 
 from psutil import Error as PsutilError
 
@@ -30,6 +31,27 @@ from mechahub.ui.internet_page import InternetPage
 from mechahub.ui.study_page import StudyPage
 from mechahub.ui.currency_page import CurrencyPage
 from mechahub.ui.system_charts import SystemChartsPage
+from mechahub.core.updates import UpdateError
+from mechahub.core.updates_install import (
+    HELPER_READY_SECONDS, cancel_installation, discard_prepared,
+    installation_ready, prepare_installation, start_installation,
+)
+
+
+class UpdatePreparationThread(QThread):
+    received = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, manifest, artifact, parent=None):
+        super().__init__(parent)
+        self.manifest = manifest
+        self.artifact = artifact
+
+    def run(self):
+        try:
+            self.received.emit(prepare_installation(self.manifest, self.artifact))
+        except Exception as error:
+            self.failed.emit(str(error))
 
 
 class ProgramScanThread(QThread):
@@ -274,6 +296,14 @@ class MainWindow(QMainWindow):
         self._close_requested = False
         self._updates_dialog: UpdatesDialog | None = None
         self._automatic_updates_started = False
+        self._update_prepare_worker = None
+        self._pending_update = None
+        self._update_helper_process = None
+        self._update_helper_ready = False
+        self._update_helper_deadline = 0.0
+        self._handoff_timer = QTimer(self)
+        self._handoff_timer.setInterval(100)
+        self._handoff_timer.timeout.connect(self._poll_update_handoff)
         self._build_ui()
         self._render_shortcuts()
         self._update_stats()
@@ -281,6 +311,10 @@ class MainWindow(QMainWindow):
         self.tick_timer = QTimer(self)
         self.tick_timer.timeout.connect(self._tick)
         self.tick_timer.start(1600)
+        self.update_check_timer = QTimer(self)
+        self.update_check_timer.setInterval(6 * 60 * 60 * 1000)
+        self.update_check_timer.timeout.connect(self._begin_automatic_updates)
+        self.update_check_timer.start()
 
     def _build_ui(self):
         central = QWidget()
@@ -347,6 +381,21 @@ class MainWindow(QMainWindow):
         status = text_label('●  Готово до роботи', 'Pill')
         top.addWidget(status, alignment=Qt.AlignmentFlag.AlignVCenter)
         col.addLayout(top)
+        self.update_banner = QFrame()
+        self.update_banner.setObjectName('Card')
+        self.update_banner.setProperty('accent', 'green')
+        banner_layout = QHBoxLayout(self.update_banner)
+        banner_layout.setContentsMargins(15, 12, 15, 12)
+        self.update_banner_label = text_label('', 'HeroText', True)
+        banner_layout.addWidget(self.update_banner_label, 1)
+        self.update_offer_button = button('Оновити', True)
+        self.update_offer_button.clicked.connect(self._show_update_offer)
+        banner_layout.addWidget(self.update_offer_button)
+        self.update_later_button = button('Пізніше')
+        self.update_later_button.clicked.connect(self.update_banner.hide)
+        banner_layout.addWidget(self.update_later_button)
+        self.update_banner.hide()
+        col.addWidget(self.update_banner)
         self.stack = QStackedWidget()
         self.stack.addWidget(self._dashboard_page())
         self.stack.addWidget(self._shortcuts_page())
@@ -918,6 +967,8 @@ class MainWindow(QMainWindow):
             self._updates_dialog = UpdatesDialog(self)
             self._updates_dialog.ready_to_close.connect(self._retry_close)
             self._updates_dialog.download_ready.connect(self._update_download_ready)
+            self._updates_dialog.update_available.connect(self._update_available)
+            self._updates_dialog.install_requested.connect(self._request_update_install)
         return self._updates_dialog
 
     def _show_updates(self):
@@ -927,8 +978,106 @@ class MainWindow(QMainWindow):
         dialog.activateWindow()
 
     def _begin_automatic_updates(self):
-        if not self._close_requested and self.isVisible():
+        if (not self._close_requested and self._pending_update is None
+                and self._update_prepare_worker is None and self.isVisible()):
             self._ensure_updates_dialog().begin_automatic_check()
+
+    def _update_available(self, manifest):
+        self.updates_button.setText('Оновлення · ' + manifest.version)
+        self.updates_button.setIcon(icon('updates', '#83E1BA'))
+        self.update_banner_label.setText(
+            f'Доступна MechaHub {manifest.version}. Онови програму зі збереженням конспектів і налаштувань.'
+        )
+        self.update_banner.show()
+
+    def _show_update_offer(self):
+        self._ensure_updates_dialog().show_update_offer()
+
+    def _request_update_install(self, manifest, artifact):
+        if self._pending_update is not None or self._update_prepare_worker is not None:
+            return
+        if not self.study_page.can_leave():
+            self._ensure_updates_dialog().installation_failed(
+                'Спочатку збережи конспект. Оновлення не почалося.'
+            )
+            return
+        self.update_banner_label.setText('Готуємо оновлення. Конспекти й налаштування залишаться на місці…')
+        self.update_banner.show()
+        self.update_offer_button.setEnabled(False)
+        self.update_later_button.setEnabled(False)
+        self._update_prepare_worker = UpdatePreparationThread(manifest, artifact, self)
+        self._update_prepare_worker.received.connect(self._update_prepared)
+        self._update_prepare_worker.failed.connect(self._update_install_failed)
+        self._update_prepare_worker.finished.connect(self._update_preparation_finished)
+        self._update_prepare_worker.start()
+
+    def _update_prepared(self, prepared):
+        self._pending_update = prepared
+        self._close_requested = True
+
+    def _update_preparation_finished(self):
+        worker, self._update_prepare_worker = self._update_prepare_worker, None
+        if worker:
+            worker.deleteLater()
+        if self._pending_update is not None or self._close_requested:
+            QTimer.singleShot(0, self.close)
+
+    def _update_install_failed(self, message):
+        self._handoff_timer.stop()
+        prepared, self._pending_update = self._pending_update, None
+        try:
+            if prepared is not None:
+                if self._update_helper_process is not None:
+                    cancel_installation(prepared, self._update_helper_process)
+                else:
+                    discard_prepared(prepared)
+        except (OSError, UpdateError):
+            pass
+        self._update_helper_process = None
+        self._update_helper_ready = False
+        self._close_requested = False
+        self.study_page._close_pending = False
+        self.currency_page.close_pending = False
+        self.currency_page.refresh_button.setEnabled(self.currency_page.worker is None)
+        self.network_page.close_pending = False
+        self.network_page.start_button.setEnabled(self.network_page.worker is None)
+        if self.isVisible():
+            self.network_page.gauge.timer.start()
+        self.update_offer_button.setEnabled(True)
+        self.update_later_button.setEnabled(True)
+        self.update_banner_label.setText('Оновлення не встановлено: ' + message)
+        self.update_banner.show()
+        dialog = self._ensure_updates_dialog()
+        dialog.installation_failed(message)
+        dialog.show_update_offer()
+
+    def _begin_update_handoff(self):
+        if self._update_helper_process is not None:
+            return
+        try:
+            self._update_helper_process = start_installation(self._pending_update)
+        except (OSError, UpdateError) as error:
+            self._update_install_failed(str(error))
+            return
+        self._update_helper_deadline = time.monotonic() + HELPER_READY_SECONDS
+        self.update_banner_label.setText('Готуємо перезапуск. Програма закриється, щойно оновлення буде готове…')
+        self._handoff_timer.start()
+
+    def _poll_update_handoff(self):
+        if self._pending_update is None:
+            self._handoff_timer.stop()
+            return
+        try:
+            ready = installation_ready(self._pending_update, self._update_helper_process)
+            if not ready and time.monotonic() >= self._update_helper_deadline:
+                raise UpdateError('Помічник оновлення не запустився вчасно. Спробуй ще раз.')
+        except (OSError, UpdateError) as error:
+            self._update_install_failed(str(error))
+            return
+        if ready:
+            self._update_helper_ready = True
+            self._handoff_timer.stop()
+            QTimer.singleShot(0, self.close)
 
     def _update_download_ready(self, path: str):
         self.updates_button.setText('Оновлення · готово')
@@ -954,6 +1103,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Не вдалося відкрити', str(error))
 
     def closeEvent(self, event):
+        if self._update_prepare_worker is not None:
+            self._close_requested = True
+            event.ignore()
+            return
+        if self._pending_update is not None and not self.study_page.can_leave():
+            self._update_install_failed('Не вдалося зберегти конспект. Програма залишилася відкритою.')
+            event.ignore()
+            return
         if not self.study_page.request_close():
             self._close_requested = True
             event.ignore()
@@ -975,11 +1132,18 @@ class MainWindow(QMainWindow):
             return
         # Never destroy an active QThread: cancel and close once it finishes.
         if hasattr(self, 'network_page') and not self.network_page.request_stop_on_close():
+            self._close_requested = True
+            event.ignore()
+            return
+        if self._pending_update is not None and not self._update_helper_ready:
+            self._begin_update_handoff()
             event.ignore()
             return
         self.internet_page.shutdown()
         self.system_charts.shutdown()
         self.tick_timer.stop()
+        self.update_check_timer.stop()
+        self._handoff_timer.stop()
         super().closeEvent(event)
 
     def _retry_close(self):

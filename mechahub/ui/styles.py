@@ -1,4 +1,6 @@
 """A varied, calm workspace theme with consistent interaction states."""
+from pathlib import Path
+import sys
 
 STYLESHEET = r'''
 QWidget {
@@ -112,9 +114,16 @@ QComboBox QAbstractItemView { background: #242B40; selection-background-color: #
 QSplitter::handle { background: #30394F; width: 5px; margin: 4px; }
 QCheckBox { background: transparent; color: #CFD7EB; spacing: 8px; }
 QCheckBox:disabled { color: #77839C; }
+QCheckBox::indicator { width: 17px; height: 17px; background: #151B2B; border: 1px solid #7B89A6; border-radius: 4px; }
+QCheckBox::indicator:hover { border-color: #C6B1FF; }
+QCheckBox::indicator:checked { background: #8065D6; border-color: #C6B1FF; image: url("%CHECK_ICON%"); }
+QCheckBox::indicator:disabled { background: #272E42; border-color: #4D5870; }
 QTextEdit, QTextBrowser { background: #1B2030; color: #D4DCF0; border: 1px solid #343E57; border-radius: 12px; padding: 10px; }
 QMenu { background: #242B40; color: #F0EEF8; border: 1px solid #49536E; padding: 6px; }
 QMenu::item { padding: 10px 18px; }
 QMenu::item:selected { background: #494064; }
 QToolTip { color: #F1EFF9; background: #31364B; border: 1px solid #777B9A; padding: 7px; }
 '''
+
+_asset_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[2]))
+STYLESHEET = STYLESHEET.replace('%CHECK_ICON%', (_asset_root / 'assets' / 'check.svg').as_posix())

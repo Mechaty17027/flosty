@@ -10,7 +10,7 @@ on:
       tag:
         description: 'Release tag matching the application version'
         required: true
-        default: 'v0.5.0'
+        default: 'v0.6.0'
         type: string
 
 permissions:
@@ -100,10 +100,14 @@ jobs:
           if (-not (Test-Path -LiteralPath $mechahubCompiler)) { throw 'Inno Setup compiler is unavailable on this Windows runner.' }
           $mechahubVersion = $env:MECHAHUB_TAG.Substring(1)
           & $mechahubCompiler ('/DMyAppVersion=' + $mechahubVersion) 'installer/MechaHub.iss'
+      - name: Check packaged in-app updates
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        run: python tools/smoke_in_app_update.py --exe dist/MechaHub.exe --installer dist/MechaHubSetup.exe --workspace build/update-smoke
       - name: Generate update manifest
         if: steps.release_status.outputs.exists == 'false'
         shell: pwsh
-        run: python tools/make_update_manifest.py --repository "$env:MECHAHUB_REPOSITORY" --tag "$env:MECHAHUB_TAG" --artifact dist/MechaHub.exe --output dist/update.json --notes-file RELEASE_NOTES_UK.md
+        run: python tools/make_update_manifest.py --repository "$env:MECHAHUB_REPOSITORY" --tag "$env:MECHAHUB_TAG" --artifact dist/MechaHub.exe --installer-artifact dist/MechaHubSetup.exe --output dist/update.json --notes-file RELEASE_NOTES_UK.md
       - name: Publish release assets
         if: steps.release_status.outputs.exists == 'false'
         shell: pwsh
