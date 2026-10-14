@@ -31,6 +31,8 @@ from mechahub.ui.internet_page import InternetPage
 from mechahub.ui.study_page import StudyPage
 from mechahub.ui.currency_page import CurrencyPage
 from mechahub.ui.system_charts import SystemChartsPage
+from mechahub.ui.cash_registers_page import CashRegistersPage
+from mechahub.ui.programming_page import ProgrammingPage
 from mechahub.core.updates import UpdateError
 from mechahub.core.updates_install import (
     HELPER_READY_SECONDS, cancel_installation, discard_prepared,
@@ -336,7 +338,8 @@ class MainWindow(QMainWindow):
         sl.addWidget(text_label('РОБОЧИЙ ПРОСТІР', 'Eyebrow'))
         navigation = [('Огляд', 'home'), ('Програми', 'apps'), ('Файли', 'files'),
                       ('Мережа', 'network'), ('Інтернет', 'globe'), ('Навчання', 'study'),
-                      ('Валюти', 'currency'), ('Графіки ПК', 'chart'), ('Про проєкт', 'info')]
+                      ('Валюти', 'currency'), ('Графіки ПК', 'chart'),
+                      ('Касові апарати', 'cash'), ('Програмування', 'code'), ('Про проєкт', 'info')]
         nav_holder = QWidget()
         nav_layout = QVBoxLayout(nav_holder)
         nav_layout.setContentsMargins(0, 0, 0, 0)
@@ -353,6 +356,7 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(nav)
         nav_layout.addStretch()
         nav_area = self._scrollable(nav_holder)
+        self.navigation_area = nav_area
         nav_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sl.addWidget(nav_area, 1)
         self.updates_button = button('Оновлення')
@@ -413,6 +417,12 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.currency_page)
         self.system_charts = SystemChartsPage(self)
         self.stack.addWidget(self.system_charts)
+        self.cash_registers_page = CashRegistersPage(self)
+        self.cash_registers_page.open_source.connect(self._open_study_source)
+        self.stack.addWidget(self.cash_registers_page)
+        self.programming_page = ProgrammingPage(self)
+        self.programming_page.ready_to_close.connect(self._retry_close)
+        self.stack.addWidget(self.programming_page)
         self.stack.addWidget(self._about_page())
         col.addWidget(self.stack, 1)
         main.addWidget(content, 1)
@@ -428,10 +438,15 @@ class MainWindow(QMainWindow):
             ('Навчання та конспекти', 'Підготовка до НМТ, захищені записи та безоплатний локальний ШІ.'),
             ('Валюти', 'Офіційні курси НБУ, графіки та перерахунок через гривню.'),
             ('Графіки ПК', 'Навантаження процесора й пам’яті та швидкість диска й мережі.'),
+            ('Касові апарати', 'Каталог моделей, офіційні джерела та власні сервісні кейси.'),
+            ('Програмування', 'Власні проєкти, Python, C++ та налаштування додаткових мов.'),
             ('Про проєкт', 'Наша дорожня карта розвитку MechaHub.'),
         ]
         if self.stack.currentWidget() is self.study_page and index != 5:
             if not self.study_page.can_leave():
+                return
+        if self.stack.currentWidget() is self.programming_page and index != 9:
+            if not self.programming_page.can_leave():
                 return
         self.stack.setCurrentIndex(index)
         if index == 4:
@@ -442,6 +457,8 @@ class MainWindow(QMainWindow):
             nav.setProperty('active', i == index)
             nav.style().unpolish(nav)
             nav.style().polish(nav)
+            if i == index:
+                self.navigation_area.ensureWidgetVisible(nav, 0, 8)
 
     def _open_study_source(self, url: str):
         self._navigate(4)
@@ -947,7 +964,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(hero)
         blocks = [
             ('✓ Уже працює', 'Моніторинг системи, персональний лаунчер, сортування файлів, анімований спідометр, ping, jitter, packet loss і мережеві лічильники.'),
-            (f'→ Що нове у {__version__}', 'Навчання та конспекти з паролем, джерела НМТ, безоплатний локальний ШІ, валютний калькулятор і живі графіки навантаження ПК.'),
+            (f'→ Що нове у {__version__}', 'Просте спілкування з ШІ та вибір мови, пароль навчання на один сеанс, довідник касових апаратів і власні проєкти Python та C++.'),
             ('→ Наступна версія', 'Моніторинг відеокарти (за підтримки драйвера), температур, віджети та глибше налаштування дизайну.'),
             ('◈ Приватність', 'Ярлики й зашифровані конспекти залишаються локально. ШІ звертається до Ollama на цьому ПК. Курси валют отримуються від НБУ, SPEED TEST — від Cloudflare, оновлення — з GitHub.'),
             ('▣ Налаштування та файли', 'Конфігурація: ' + str(config_file())),
@@ -1037,6 +1054,7 @@ class MainWindow(QMainWindow):
         self._update_helper_ready = False
         self._close_requested = False
         self.study_page._close_pending = False
+        self.programming_page._close_pending = False
         self.currency_page.close_pending = False
         self.currency_page.refresh_button.setEnabled(self.currency_page.worker is None)
         self.network_page.close_pending = False
@@ -1107,11 +1125,25 @@ class MainWindow(QMainWindow):
             self._close_requested = True
             event.ignore()
             return
-        if self._pending_update is not None and not self.study_page.can_leave():
-            self._update_install_failed('Не вдалося зберегти конспект. Програма залишилася відкритою.')
+        if not self.cash_registers_page.request_close():
+            self._close_requested = False
+            if self._pending_update is not None:
+                self._update_install_failed('Незбережений кейс залишено відкритим. Збережи його й повтори оновлення.')
             event.ignore()
             return
-        if not self.study_page.request_close():
+        if not self.programming_page.can_leave():
+            self._close_requested = False
+            if self._pending_update is not None:
+                self._update_install_failed('Не вдалося зберегти код. Програма залишилася відкритою.')
+            event.ignore()
+            return
+        if not self.study_page.can_leave():
+            self._close_requested = False
+            if self._pending_update is not None:
+                self._update_install_failed('Не вдалося зберегти конспект. Програма залишилася відкритою.')
+            event.ignore()
+            return
+        if not self.programming_page.request_close():
             self._close_requested = True
             event.ignore()
             return
@@ -1136,7 +1168,19 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if self._pending_update is not None and not self._update_helper_ready:
+            # Keep the unlocked study session if the updater later fails to start.
+            # A running worker must still finish before handing off the executable.
+            if self.study_page._worker is not None:
+                self.study_page._stop()
+                self.study_page._close_pending = True
+                self._close_requested = True
+                event.ignore()
+                return
             self._begin_update_handoff()
+            event.ignore()
+            return
+        if not self.study_page.request_close():
+            self._close_requested = True
             event.ignore()
             return
         self.internet_page.shutdown()

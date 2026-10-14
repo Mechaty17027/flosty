@@ -10,7 +10,7 @@ on:
       tag:
         description: 'Release tag matching the application version'
         required: true
-        default: 'v0.6.1'
+        default: 'v0.7.0'
         type: string
 
 permissions:
@@ -85,7 +85,12 @@ jobs:
         run: |
           python tools/make_windows_icon.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name MechaHub --icon build/MechaHub.ico --add-data "assets;assets" main.py
+          python tools/prepare_python_runtime.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name MechaHub --icon build/MechaHub.ico --add-data "assets;assets" --add-data "build/python_runtime;python_runtime" main.py
+      - name: Check real C++ projects
+        if: steps.release_status.outputs.exists == 'false'
+        run: python tools/smoke_cpp_workspace.py
       - name: Check packaged application
         if: steps.release_status.outputs.exists == 'false'
         shell: pwsh

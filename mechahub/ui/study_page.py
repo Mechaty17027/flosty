@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from mechahub.core.settings import config_file
 from mechahub.core.study import SUBJECTS, StudyVault
-from mechahub.core.study_ai import AISettings, StudyAIClient, StudyAIError, StudyAIConnectionError
+from mechahub.core.study_ai import AISettings, REPLY_LANGUAGES, StudyAIClient, StudyAIError, StudyAIConnectionError
 from mechahub.core.study_setup import start_ollama
 from mechahub.core.study_sources import sources_for_subject
 
@@ -72,6 +72,10 @@ class StudyPage(QWidget):
         self._note_id = None
         self._dirty = False
         self._history = []
+        self._chat_mode = 'study'
+        self._conversation_states = {}
+        stored_language = self.settings.value('study/reply_language', 'auto', type=str)
+        self._reply_language = stored_language if stored_language in dict(REPLY_LANGUAGES) else 'auto'
         self._last_answer = ''
         self._answer_target = None
         self._generation = 0
@@ -124,8 +128,8 @@ class StudyPage(QWidget):
     def _refresh_gate(self):
         exists = self.vault.exists
         self.gate_title.setText('Вхід до навчання' if exists else 'Створи пароль для навчання')
-        self.gate_hint.setText('Введи пароль, щоб відкрити конспекти та помічника.' if exists else
-                               'Один пароль захищає конспекти з усіх чотирьох предметів.')
+        self.gate_hint.setText('Введи пароль один раз за сеанс. «Заблокувати» або закриття MechaHub завершують доступ.' if exists else
+                               'Один пароль захищає конспекти з усіх чотирьох предметів. При переході до інших розділів повторний вхід не потрібен.')
         self.password_confirm.setVisible(not exists)
         self.unlock_button.setText('Відкрити' if exists else 'Створити та відкрити')
 
@@ -139,8 +143,32 @@ class StudyPage(QWidget):
             self.subject.addItem(name, key)
         self.subject.currentIndexChanged.connect(self._change_subject)
         header.addWidget(self.subject, 1)
+        self.general_heading = label('Просте спілкування', 'Section')
+        self.general_heading.hide()
+        header.addWidget(self.general_heading, 1)
         header.addWidget(button('Заблокувати', self.lock))
         root.addLayout(header)
+        mode_controls = QHBoxLayout()
+        self.study_chat_button = button('Навчання НМТ', lambda: self._set_chat_mode('study'))
+        self.study_chat_button.setCheckable(True)
+        self.general_chat_button = button('Просте спілкування', lambda: self._set_chat_mode('general'), True)
+        self.general_chat_button.setCheckable(True)
+        mode_controls.addWidget(self.study_chat_button)
+        mode_controls.addWidget(self.general_chat_button)
+        mode_controls.addStretch()
+        mode_controls.addWidget(label('Мова відповіді:'))
+        self.reply_language = QComboBox()
+        self.reply_language.setAccessibleName('Мова відповіді ШІ')
+        self.reply_language.setToolTip(
+            '«Автоматично» — мова основного запитання; для неоднозначного запиту — українська. '
+            'Мовний приклад не змінює мову пояснень. Якість залежить від локальної моделі.'
+        )
+        for code, name in REPLY_LANGUAGES:
+            self.reply_language.addItem(name, code)
+        self.reply_language.setCurrentIndex(self.reply_language.findData(self._reply_language))
+        self.reply_language.currentIndexChanged.connect(self._language_changed)
+        mode_controls.addWidget(self.reply_language)
+        root.addLayout(mode_controls)
         self.tabs = QTabWidget()
         self.tabs.addTab(self._notes_page(), 'Конспекти')
         self.tabs.addTab(self._chat_page(), 'ШІ-помічник')
@@ -149,6 +177,7 @@ class StudyPage(QWidget):
         root.addWidget(self.tabs, 1)
         self.status = label('Тексти зберігаються тільки на цьому ПК.')
         root.addWidget(self.status)
+        self._update_mode_controls()
         return page
 
     def _notes_page(self):
@@ -192,7 +221,8 @@ class StudyPage(QWidget):
     def _chat_page(self):
         page = QWidget()
         root = QVBoxLayout(page)
-        root.addWidget(label('Став запитання, тренуй завдання НМТ або розбирай помилки. Звіряй пояснення з навчальними джерелами.'))
+        self.chat_intro = label('Став запитання, тренуй завдання НМТ або розбирай помилки. Звіряй пояснення з навчальними джерелами.')
+        root.addWidget(self.chat_intro)
         self.chat_ai_status = label('Перед першим запитом налаштуй Ollama та завантаж локальну модель.')
         root.addWidget(self.chat_ai_status)
         self.setup_button = button('Налаштувати ШІ', lambda: self.tabs.setCurrentIndex(3))
@@ -216,7 +246,9 @@ class StudyPage(QWidget):
         line.addWidget(self.apply_button)
         line.addWidget(button('Очистити чат', self._clear_chat))
         root.addLayout(line)
-        root.addWidget(label('Правки застосовуються після твого натискання. Ctrl+Z у редакторі скасовує заміну.'))
+        self.apply_hint = label('Правки застосовуються після твого натискання. Ctrl+Z у редакторі скасовує заміну.')
+        root.addWidget(self.apply_hint)
+        root.addWidget(label('«Автоматично» — мова запитання; для неоднозначного запиту — українська. Мову можна обрати вище.'))
         return page
 
     def _sources_page(self):
@@ -407,13 +439,80 @@ class StudyPage(QWidget):
             with QSignalBlocker(self.subject):
                 self.subject.setCurrentIndex(self.subject.findData(self._subject_key))
             return
+        self._store_conversation()
         self._stop()
         self._generation += 1
         self._subject_key = selected
-        self._clear_chat()
+        self._restore_conversation()
         if self.vault.unlocked:
             self._load_notes()
             self._render_sources()
+
+    def _conversation_key(self):
+        return (self._chat_mode, self._subject_key if self._chat_mode == 'study' else None, self._reply_language)
+
+    def _store_conversation(self):
+        if self.vault.unlocked:
+            self._conversation_states[self._conversation_key()] = {
+                'history': list(self._history), 'transcript': self.transcript.toPlainText(),
+                'question': self.question.toPlainText(),
+            }
+
+    def _restore_conversation(self):
+        state = self._conversation_states.get(self._conversation_key(), {})
+        self._history = list(state.get('history', []))
+        self.transcript.setPlainText(state.get('transcript', ''))
+        self.question.setPlainText(state.get('question', ''))
+        cursor = self.transcript.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.transcript.setTextCursor(cursor)
+        self.transcript.ensureCursorVisible()
+        self._last_answer = ''
+        self._answer_target = None
+        self.apply_button.setEnabled(False)
+
+    def _update_mode_controls(self):
+        general = self._chat_mode == 'general'
+        self.study_chat_button.setChecked(not general)
+        self.general_chat_button.setChecked(general)
+        self.subject.setEnabled(not general)
+        self.subject.setVisible(not general)
+        self.general_heading.setVisible(general)
+        self.apply_button.setVisible(not general)
+        self.apply_hint.setVisible(not general)
+        self.chat_intro.setText(
+            'Спілкування на будь-які теми: ідеї, пояснення та повсякденні справи. Ця розмова окрема від НМТ.'
+            if general else
+            'Став запитання, тренуй завдання НМТ або розбирай помилки. Звіряй пояснення з навчальними джерелами.'
+        )
+        self.question.setPlaceholderText('Напиши, про що хочеш поговорити…' if general else
+                                         'Наприклад: поясни квадратні рівняння й дай 3 тренувальні завдання.')
+
+    def _set_chat_mode(self, mode):
+        if mode not in {'study', 'general'} or not self.vault.unlocked:
+            return
+        if mode != self._chat_mode:
+            self._store_conversation()
+            self._stop()
+            self._generation += 1
+            self._chat_mode = mode
+            self._restore_conversation()
+        self._update_mode_controls()
+        self.tabs.setCurrentIndex(1)
+        self.status.setText('Просте спілкування. Мову відповіді можна обрати вище.' if mode == 'general' else
+                            'Навчання НМТ. Обери предмет і постав запитання.')
+
+    def _language_changed(self):
+        language = self.reply_language.currentData()
+        if language == self._reply_language:
+            return
+        self._store_conversation()
+        self._stop()
+        self._generation += 1
+        self._reply_language = language
+        self.settings.setValue('study/reply_language', language)
+        self._restore_conversation()
+        self.status.setText('Мова відповіді: ' + self.reply_language.currentText() + '. Можна надіслати новий запит.')
 
     def _client(self):
         return StudyAIClient(AISettings(model=self.model.currentText().strip()))
@@ -423,6 +522,7 @@ class StudyPage(QWidget):
             return False
         generation = self._generation
         worker = StudyWorker(operation, self, reports_progress=reports_progress)
+        worker.generation = generation
         self._worker = worker
         worker.received.connect(lambda result: callback(result) if generation == self._generation and self.vault.unlocked else None)
         worker.failed.connect(lambda message: self._ai_failed(message) if generation == self._generation and self.vault.unlocked else None)
@@ -512,10 +612,14 @@ class StudyPage(QWidget):
     def _ask(self, task):
         if self._worker is not None or not self.vault.unlocked:
             return
+        if task != 'chat' and self._chat_mode != 'study':
+            self._set_chat_mode('study')
         message = self.question.toPlainText().strip() if task == 'chat' else ('Структуруй конспект і поясни правки.' if task == 'structure' else 'Поясни тему конспекту, перевір помилки й доповни потрібними прикладами.')
         note = self.note_body.toPlainText() if task != 'chat' else ''
         if not message or (task != 'chat' and not note.strip()):
             self.status.setText('Спочатку напиши запитання або текст конспекту.')
+            return
+        if task != 'chat' and not self.save_note():
             return
         try:
             client = self._client()
@@ -523,10 +627,12 @@ class StudyPage(QWidget):
             self._ai_failed(str(error))
             return
         history = list(self._history)
-        sources = tuple((source.title, source.url) for source in sources_for_subject(self._subject_key))
-        subject = self._subject_key
+        mode, language = self._chat_mode, self._reply_language
+        sources = tuple((source.title, source.url) for source in sources_for_subject(self._subject_key)) if mode == 'study' else ()
+        subject = self._subject_key if mode == 'study' else None
         target = (self._note_id, note) if task != 'chat' else None
-        if self._start_worker(lambda cancel: client.ask(subject, message, history=history, note_text=note, task=task, sources=sources, cancel=cancel),
+        if self._start_worker(lambda cancel: client.ask(subject, message, history=history, note_text=note, task=task, sources=sources, cancel=cancel,
+                                                      mode=mode, language=language),
                               lambda answer: self._answer_received(message, answer, task, target)):
             self._append_chat('Ти', message)
             self.tabs.setCurrentIndex(1)
@@ -547,9 +653,10 @@ class StudyPage(QWidget):
         self._history.extend([{'role': 'user', 'content': message}, {'role': 'assistant', 'content': answer}])
         self._history = self._history[-12:]
         self._last_answer = answer
-        self._answer_target = target if task in ('structure', 'explain') else None
+        self._answer_target = target if task in ('structure', 'explain') and self._chat_mode == 'study' else None
         self.apply_button.setEnabled(self._answer_matches_editor())
-        self.status.setText('Відповідь готова. Перевір її за джерелами та застосуй правки за потреби.')
+        self.status.setText('Відповідь готова. Можна продовжити розмову.' if self._chat_mode == 'general' else
+                            'Відповідь готова. Перевір її за джерелами та застосуй правки за потреби.')
         self.chat_ai_status.setText(self.status.text())
 
     def _apply_answer(self):
@@ -567,7 +674,8 @@ class StudyPage(QWidget):
         self.apply_button.setEnabled(False)
 
     def _answer_matches_editor(self):
-        return self._answer_target is not None and self._answer_target == (self._note_id, self.note_body.toPlainText())
+        return (self._chat_mode == 'study' and self._answer_target is not None
+                and self._answer_target == (self._note_id, self.note_body.toPlainText()))
 
     def _ai_failed(self, message):
         self.status.setText(message)
@@ -592,7 +700,7 @@ class StudyPage(QWidget):
     def _worker_finished(self):
         worker, self._worker = self._worker, None
         if worker:
-            if worker.cancel.is_set() and self.vault.unlocked:
+            if worker.cancel.is_set() and self.vault.unlocked and worker.generation == self._generation:
                 self.status.setText('Операцію зупинено. Можна повторити запит або завантаження.')
                 self.ai_status.setText(self.status.text())
                 self.chat_ai_status.setText(self.status.text())
@@ -608,6 +716,7 @@ class StudyPage(QWidget):
         self.transcript.clear()
         self.question.clear()
         self._history.clear()
+        self._conversation_states.pop(self._conversation_key(), None)
         self._last_answer = ''
         self._answer_target = None
         self.apply_button.setEnabled(False)
@@ -619,6 +728,7 @@ class StudyPage(QWidget):
         if not self.save_note():
             return False
         self._clear_chat()
+        self._conversation_states.clear()
         self.vault.lock()
         self._set_editor()
         with QSignalBlocker(self.notes):
@@ -631,7 +741,7 @@ class StudyPage(QWidget):
 
     def hideEvent(self, event):
         if self.vault.unlocked:
-            self.lock()
+            self.save_note()
         super().hideEvent(event)
 
     def request_close(self):

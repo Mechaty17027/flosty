@@ -21,6 +21,8 @@ DEFAULT_COLOR = '#A8B8D6'
 
 # All artwork is local SVG geometry; no fonts, downloads, or external resources.
 _SHAPES = {
+    'cash': '<path d="M4 10h16v11H4Z M6 10V3h12v7M8 6h8M8 14h2M14 14h2M8 17h8"/>',
+    'code': '<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/>',
     'study': '<path d="M3 4h6c2 0 3 1 3 2 0-1 1-2 3-2h6v15h-6c-2 0-3 1-3 2-1-1-2-2-4-2H3Z"/><path d="M12 6v15M6 8h3M15 8h3"/>',
     'currency': '<circle cx="12" cy="12" r="9"/><path d="M15.5 7.5h-5a2.5 2.5 0 0 0 0 5h3a2.5 2.5 0 0 1 0 5h-5M12 5v14"/>',
     'chart': '<path d="M3 3v18h18M6 16l4-6 4 3 6-8"/>',

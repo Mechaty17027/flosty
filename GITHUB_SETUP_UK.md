@@ -5,7 +5,7 @@
 ## Що підготовлено
 
 - `.github/workflows/check.yml`: перевірка залежностей і тести на Windows із Python 3.12 при змінах у `main` або pull request.
-- `.github/workflows/release.yml`: після зміни номера версії в `main`, надсилання тега `vX.Y.Z` або ручного запуску через Actions перевіряє номер програми, виконує тести, збирає `MechaHub.exe` і публікує його разом з `update.json`. Якщо реліз із цим тегом уже існує, його файли зберігаються й повторна збірка пропускається.
+- `.github/workflows/release.yml`: після зміни номера версії в `main`, надсилання тега `vX.Y.Z` або ручного запуску через Actions перевіряє номер програми, виконує тести, збирає `MechaHub.exe` із приватним Python runtime та `MechaHubSetup.exe` і публікує їх разом з `update.json`. Якщо реліз із цим тегом уже існує, його файли зберігаються й повторна збірка пропускається.
 - `tools/make_update_manifest.py`: обчислює SHA-256 та фактичний розмір готового EXE; створює посилання на цей конкретний реліз.
 - `.gitignore`: виключає локальне середовище, результати збірки, кеші та знімки інтерфейсу.
 - `.gitattributes`: зберігає Windows BAT із CRLF, а текстовий код — із LF.
@@ -17,7 +17,7 @@
 1. Відкрий публічний репозиторій [Mechaty17027/flosty](https://github.com/Mechaty17027/flosty). Публічність дозволяє програмі отримувати оновлення без особистого токена GitHub.
 2. Завантаж у гілку `main` вміст саме папки `MechaHub_v0.3.0`: `main.py`, `mechahub`, `assets`, `tests`, `tools`, `.github` та інші вихідні файли. `.venv`, `build`, `dist` і `artifacts` не надсилай у Git.
 3. Переконайся, що GitHub Actions дозволені. Перший push із файлом версії й сценарієм релізу запускає `Check MechaHub` та `Publish Windows release`.
-4. Дочекайся успішного завершення сценаріїв. `Publish Windows release` визначить версію `0.6.0`, створить тег `v0.6.0` на коміті цієї збірки й опублікує реліз із вкладеннями `MechaHub.exe`, `MechaHubSetup.exe` та `update.json`. Ручний запуск доступний за інструкцією нижче.
+4. Дочекайся успішного завершення сценаріїв. `Publish Windows release` визначить версію `0.7.0`, створить тег `v0.7.0` на коміті цієї збірки й опублікує реліз із вкладеннями `MechaHub.exe`, `MechaHubSetup.exe` та `update.json`. Ручний запуск доступний за інструкцією нижче.
 5. У MechaHub відкрий «Оновлення» → «Перевірка онлайн». Адреса джерела цього проєкту:
 
 ```text
@@ -28,7 +28,7 @@ https://github.com/Mechaty17027/flosty/releases/latest/download/update.json
 
 ## Автоматична публікація наступної версії
 
-Підготуй зміни програми, історію змін і `RELEASE_NOTES_UK.md`, потім онови `__version__` у `mechahub/__init__.py`, наприклад до `0.6.1`. Надішли всі ці зміни разом у `main`. Сценарій отримає тег `v0.6.1` із номера версії, перевірить код, збере EXE й опублікує реліз на цьому конкретному коміті.
+Підготуй зміни програми, історію змін і `RELEASE_NOTES_UK.md`, потім онови `__version__` у `mechahub/__init__.py`, наприклад до `0.7.1`. Надішли всі ці зміни разом у `main`. Сценарій отримає тег `v0.7.1` із номера версії, перевірить код, збере EXE й опублікує реліз на цьому конкретному коміті.
 
 Автоматична публікація реагує на `mechahub/__init__.py` і `.github/workflows/release.yml`. Для змін цих файлів зі вже опублікованою версією сценарій повідомить, що реліз існує, і пропустить повторну збірку та завантаження вкладень. Перевірка `Check MechaHub` продовжує виконуватися для змін коду в `main`.
 
@@ -36,9 +36,9 @@ https://github.com/Mechaty17027/flosty/releases/latest/download/update.json
 
 ## Ручний запуск через браузер
 
-Після завантаження коду в основну гілку `main` і успішної перевірки `Check MechaHub` відкрий у репозиторії **Actions → Publish Windows release → Run workflow**. Вибери гілку `main` і введи тег `v0.6.0`, потім натисни **Run workflow**. Кнопка ручного запуску доступна, коли файл сценарію вже є в основній гілці; це поведінка [workflow_dispatch у GitHub](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+Після завантаження коду в основну гілку `main` і успішної перевірки `Check MechaHub` відкрий у репозиторії **Actions → Publish Windows release → Run workflow**. Вибери гілку `main` і введи тег `v0.7.0`, потім натисни **Run workflow**. Кнопка ручного запуску доступна, коли файл сценарію вже є в основній гілці; це поведінка [workflow_dispatch у GitHub](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
-Значення тега має точно дорівнювати `v` плюс `__version__` із `mechahub/__init__.py`. Наприклад, для `__version__ = '0.6.0'` потрібен `v0.6.0`. Перевірка номера зупинить сценарій, якщо вони не збігаються.
+Значення тега має точно дорівнювати `v` плюс `__version__` із `mechahub/__init__.py`. Наприклад, для `__version__ = '0.7.0'` потрібен `v0.7.0`. Перевірка номера зупинить сценарій, якщо вони не збігаються.
 
 GitHub виконає тести, збере EXE, створить відсутній тег на конкретному коміті цього запуску й опублікує усі три файли. Вручну завантажувати EXE та JSON у реліз не потрібно. Якщо реліз із цим тегом уже існує, сценарій пропустить повторну збірку й збереже його вкладення. Для наступної версії онови номер і release notes та введи новий тег.
 
@@ -51,7 +51,7 @@ GitHub виконає тести, збере EXE, створить відсут�
 ```powershell
 git init -b main
 git add .
-git commit -m "Prepare MechaHub 0.6.0"
+git commit -m "Prepare MechaHub 0.7.0"
 git remote add origin https://github.com/Mechaty17027/flosty.git
 git push -u origin main
 ```
@@ -63,7 +63,7 @@ git push -u origin main
 `update.json` створюється зі справжнього бінарного файла. Не заповнюй контрольну суму вручну й не підмінюй її прикладом.
 
 ```powershell
-python tools/make_update_manifest.py --repository Mechaty17027/flosty --tag v0.6.0 --artifact dist/MechaHub.exe --installer-artifact dist/MechaHubSetup.exe --output dist/update.json --notes-file RELEASE_NOTES_UK.md
+python tools/make_update_manifest.py --repository Mechaty17027/flosty --tag v0.7.0 --artifact dist/MechaHub.exe --installer-artifact dist/MechaHubSetup.exe --output dist/update.json --notes-file RELEASE_NOTES_UK.md
 ```
 
 Поля: `version`, `download_url`, `sha256`, `size`, `notes`, а також `installer_download_url`, `installer_sha256`, `installer_size`. Перший набір описує переносний EXE, другий — інсталятор для оновлення встановленої копії. Старі версії читають попередні поля, а нові вибирають потрібний файл за типом поточної копії. Посилання на EXE вказує на конкретний тег; посилання джерела через `latest` отримує опис найновішого релізу. Перед завершенням завантаження MechaHub перевіряє розмір і SHA-256. Контрольна сума підтверджує відповідність файла опису релізу; вона не є цифровим підписом Windows.

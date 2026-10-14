@@ -47,20 +47,64 @@ def main() -> int:
 
 
 def _self_check(app: QApplication, window: MainWindow) -> None:
-    """Exercise the packaged browser on local HTML, then exit with a status code."""
-    from PySide6.QtCore import QTimer
+    """Exercise local browser HTML and bundled coding Python in isolated data."""
+    import tempfile
+    from PySide6.QtCore import QTimer, Qt
+    from mechahub.ui.programming_page import ProgrammingPage
     timer = QTimer(window)
     timer.setSingleShot(True)
+    coding_timer = QTimer(window)
+    coding_timer.setInterval(50)
     completed = False
+    coding_page = None
+    coding_folder = None
+    input_sent = False
+    pending_code = None
 
     def finish(code: int):
-        nonlocal completed
+        nonlocal completed, pending_code
         if completed:
             return
-        completed = True
         timer.stop()
+        coding_timer.stop()
+        if pending_code is None:
+            pending_code = code
+        if coding_page is not None and not coding_page.request_close():
+            coding_page.ready_to_close.connect(lambda: finish(pending_code))
+            return
+        completed = True
+        if coding_page is not None:
+            coding_page.close()
+        if coding_folder is not None:
+            # Only remove the exact private temporary folder created below.
+            path = Path(coding_folder.name).resolve()
+            if path.parent == Path(tempfile.gettempdir()).resolve() and path.name.startswith('mechahub-coding-check-'):
+                coding_folder.cleanup()
         window.close()
-        app.exit(code)
+        app.exit(pending_code)
+
+    def check_coding():
+        nonlocal input_sent
+        if coding_page.process is None:
+            output = coding_page.output.toPlainText()
+            finish(0 if 'MECHAHUB_CODING_OK Привіт 42' in output else 1)
+            return
+        if not input_sent and coding_page.stdin_input.isEnabled():
+            coding_page.stdin_input.setText('Привіт')
+            coding_page.send_input()
+            input_sent = True
+
+    def begin_coding():
+        nonlocal coding_page, coding_folder
+        if completed or coding_page is not None:
+            return
+        coding_folder = tempfile.TemporaryDirectory(prefix='mechahub-coding-check-')
+        workspace = Path(coding_folder.name)
+        coding_page = ProgrammingPage(window, workspace_dir=workspace)
+        coding_page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        coding_page.editor.setPlainText("from decimal import Decimal\nname = input('Name: ')\nprint('MECHAHUB_CODING_OK', name, int(Decimal('21') * 2))\n")
+        coding_page.run_code()
+        coding_timer.start()
 
     def begin():
         window._navigate(4)
@@ -76,7 +120,7 @@ def _self_check(app: QApplication, window: MainWindow) -> None:
 
             def verified(value):
                 valid = isinstance(value, str) and 'MechaHub' in value and 'Нова вкладка' in value
-                QTimer.singleShot(0, lambda: finish(0 if valid else 1))
+                QTimer.singleShot(0, begin_coding if valid else lambda: finish(1))
 
             view.page().runJavaScript(
                 "document.title + ' | ' + (document.body ? document.body.innerText : '')", verified,
@@ -89,7 +133,8 @@ def _self_check(app: QApplication, window: MainWindow) -> None:
                      '<body>Нова вкладка · MechaHub self-check</body></html>')
 
     timer.timeout.connect(lambda: finish(1))
-    timer.start(20000)
+    coding_timer.timeout.connect(check_coding)
+    timer.start(25000)
     QTimer.singleShot(0, begin)
 
 

@@ -4,6 +4,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from pathlib import Path
 import time
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -21,6 +22,11 @@ class HostUpdateTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.environment = patch.dict(os.environ, {'APPDATA': self.folder.name, 'LOCALAPPDATA': self.folder.name})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         with patch.object(MainWindow, '_update_stats'), patch.object(MainWindow, '_update_processes'), \
              patch('mechahub.ui.main_window.read_shortcuts', return_value=[]):
             self.window = MainWindow()
@@ -99,6 +105,49 @@ class HostUpdateTests(unittest.TestCase):
             self.app.processEvents()
         self.assertTrue(self.window._update_helper_ready)
         close.assert_called_once()
+
+    def test_handoff_preserves_study_session_until_helper_ready(self):
+        self.window.study_page.vault.create('isolated-password')
+        self.window._pending_update = Mock()
+        with patch('mechahub.ui.main_window.start_installation', return_value=Mock()), \
+                patch.object(self.window.study_page, 'request_close') as lock_session:
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+        lock_session.assert_not_called()
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(self.window.study_page.vault.unlocked)
+
+    def test_unsaved_case_prevents_host_close_before_study_is_locked(self):
+        self.window._close_requested = True
+        with patch.object(self.window.cash_registers_page, 'request_close', return_value=False), \
+                patch.object(self.window.study_page, 'request_close') as study_close:
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        self.assertFalse(self.window._close_requested)
+        study_close.assert_not_called()
+
+    def test_unsaved_case_cancels_prepared_update_without_starting_helper(self):
+        self.window._pending_update = Mock()
+        with patch.object(self.window.cash_registers_page, 'request_close', return_value=False), \
+                patch.object(self.window, '_update_install_failed') as failed, \
+                patch('mechahub.ui.main_window.start_installation') as start:
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        failed.assert_called_once()
+        start.assert_not_called()
+
+    def test_code_save_failure_prevents_update_handoff(self):
+        self.window._pending_update = Mock()
+        with patch.object(self.window.programming_page, 'can_leave', return_value=False), \
+                patch.object(self.window, '_update_install_failed') as failed, \
+                patch('mechahub.ui.main_window.start_installation') as start:
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        failed.assert_called_once()
+        start.assert_not_called()
 
     def test_start_failure_restores_controls_and_leaves_app_open(self):
         self.window._pending_update = Mock()

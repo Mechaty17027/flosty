@@ -76,20 +76,80 @@ class StudyUiTests(unittest.TestCase):
         self.assertIn('квадратні рівняння', self.page.note_body.toPlainText())
         self.assertNotIn('Секретний'.encode(), self.path.read_bytes())
 
-    def test_hide_saves_then_relocks_and_clears_editors_and_chat(self):
+    def test_hide_saves_notes_and_keeps_unlocked_session_for_return_navigation(self):
         self.unlock()
         self.page.note_title.setText('Нова тема')
         self.page.note_body.setPlainText('Захищені дані')
         self.page._append_chat('Ти', 'Особисте запитання')
         self.page.hide()
         self.app.processEvents()
-        self.assertFalse(self.page.vault.unlocked)
-        self.assertEqual(self.page.note_body.toPlainText(), '')
-        self.assertEqual(self.page.transcript.toPlainText(), '')
+        self.assertTrue(self.page.vault.unlocked)
+        self.assertEqual(self.page.note_body.toPlainText(), 'Захищені дані')
+        self.assertIn('Особисте запитання', self.page.transcript.toPlainText())
+        self.page.show()
+        self.app.processEvents()
+        self.assertEqual(self.page.stack.currentIndex(), 1)
+        self.assertEqual(self.page.password.text(), '')
+        self.assertFalse(any('password' in key.lower() for key in self.settings.allKeys()))
         vault = StudyVault(self.path)
         vault.unlock('test-password-123')
         self.assertEqual(vault.list_notes()[0].body, 'Захищені дані')
         vault.lock()
+
+    def test_explicit_lock_clears_all_chat_modes_and_passwords_and_closes_session(self):
+        self.unlock()
+        self.page.note_body.setPlainText('Приватний конспект')
+        self.page.question.setPlainText('Приватне запитання для НМТ')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Приватна відповідь для НМТ'):
+            self.page._ask('chat')
+            self.wait_worker()
+        self.page.general_chat_button.click()
+        self.page.question.setPlainText('Приватна розмова')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Приватна відповідь у розмові'):
+            self.page._ask('chat')
+            self.wait_worker()
+        self.assertTrue(self.page._conversation_states)
+        self.assertTrue(self.page.lock())
+        self.assertFalse(self.page.vault.unlocked)
+        self.assertEqual(self.page.stack.currentIndex(), 0)
+        self.assertEqual(self.page.note_body.toPlainText(), '')
+        self.assertEqual(self.page.transcript.toPlainText(), '')
+        self.assertEqual(self.page.question.toPlainText(), '')
+        self.assertEqual(self.page._history, [])
+        self.assertEqual(self.page._conversation_states, {})
+        self.assertEqual(self.page.password.text(), '')
+        self.assertEqual(self.page.password_confirm.text(), '')
+        saved_settings = '\n'.join(str(self.settings.value(key)) for key in self.settings.allKeys())
+        self.assertNotIn('test-password-123', saved_settings)
+        self.assertNotIn('Приват', saved_settings)
+        self.assertNotIn('Приватний'.encode(), self.path.read_bytes())
+
+    def test_hiding_page_does_not_cancel_pending_ai_and_answer_is_ready_on_return(self):
+        self.unlock()
+        entered, release = threading.Event(), threading.Event()
+
+        def ask(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return 'Відповідь підготовлена у фоні'
+
+        self.page.question.setPlainText('Поясни тему')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', side_effect=ask):
+            try:
+                self.page._ask('chat')
+                self.assertTrue(entered.wait(1))
+                self.page.hide()
+                self.app.processEvents()
+                self.assertTrue(self.page.vault.unlocked)
+                self.assertFalse(self.page._worker.cancel.is_set())
+                release.set()
+                self.wait_worker()
+            finally:
+                release.set()
+        self.page.show()
+        self.app.processEvents()
+        self.assertEqual(self.page.stack.currentIndex(), 1)
+        self.assertIn('Відповідь підготовлена у фоні', self.page.transcript.toPlainText())
 
     def test_ai_proposal_requires_apply_and_can_be_undone(self):
         self.unlock()
@@ -346,3 +406,115 @@ class StudyUiTests(unittest.TestCase):
             self.wait_worker()
             start.assert_not_called()
         self.assertIn('готова', self.page.ai_status.text())
+
+    def test_general_chat_is_separate_from_exam_context_and_cannot_apply_notes(self):
+        self.unlock()
+        self.page.note_body.setPlainText('Мій приватний академічний конспект')
+        self.page.question.setPlainText('Академічне запитання')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Академічна відповідь'):
+            self.page._ask('chat')
+            self.wait_worker()
+        self.page.general_chat_button.click()
+        self.assertEqual(self.page.subject.count(), 4)
+        self.assertFalse(self.page.subject.isEnabled())
+        self.assertEqual(self.page._history, [])
+        self.assertNotIn('Академічна відповідь', self.page.transcript.toPlainText())
+        self.assertTrue(self.page.apply_button.isHidden())
+        self.page.question.setPlainText('Поговорімо про музику')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Вільна розмова про музику') as ask:
+            self.page._ask('chat')
+            self.wait_worker()
+        self.assertIsNone(ask.call_args.args[0])
+        self.assertEqual(ask.call_args.kwargs['mode'], 'general')
+        self.assertEqual(ask.call_args.kwargs['history'], [])
+        self.assertEqual(ask.call_args.kwargs['note_text'], '')
+        self.assertEqual(ask.call_args.kwargs['sources'], ())
+        self.assertFalse(self.page.apply_button.isEnabled())
+        self.page._apply_answer()
+        self.assertEqual(self.page.note_body.toPlainText(), 'Мій приватний академічний конспект')
+        self.page.study_chat_button.click()
+        self.assertTrue(self.page.subject.isEnabled())
+        self.assertIn('Академічна відповідь', self.page.transcript.toPlainText())
+        self.assertNotIn('Вільна розмова про музику', self.page.transcript.toPlainText())
+        self.page.general_chat_button.click()
+        self.assertIn('Вільна розмова про музику', self.page.transcript.toPlainText())
+        self.assertNotIn('Академічна відповідь', self.page.transcript.toPlainText())
+
+    def test_reply_language_is_explicitly_passed_and_each_language_has_separate_history(self):
+        self.unlock()
+        self.page.reply_language.setCurrentIndex(self.page.reply_language.findData('uk'))
+        self.page.question.setPlainText('Explain “present perfect”')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Пояснення українською') as ask:
+            self.page._ask('chat')
+            self.wait_worker()
+        self.assertEqual(ask.call_args.kwargs['language'], 'uk')
+        self.assertEqual(self.settings.value('study/reply_language'), 'uk')
+        self.page.reply_language.setCurrentIndex(self.page.reply_language.findData('en'))
+        self.assertEqual(self.page._history, [])
+        self.assertNotIn('Пояснення українською', self.page.transcript.toPlainText())
+        self.page.question.setPlainText('English follow-up')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='English explanation') as ask:
+            self.page._ask('chat')
+            self.wait_worker()
+        self.assertEqual(ask.call_args.kwargs['language'], 'en')
+        self.assertEqual(ask.call_args.kwargs['history'], [])
+        self.page.reply_language.setCurrentIndex(self.page.reply_language.findData('uk'))
+        self.assertIn('Пояснення українською', self.page.transcript.toPlainText())
+        self.assertNotIn('English explanation', self.page.transcript.toPlainText())
+
+    def test_mode_switch_discards_queued_reply_from_previous_conversation(self):
+        self.unlock()
+        self.page.question.setPlainText('Запит для НМТ')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Запізніла академічна відповідь'):
+            self.page._ask('chat')
+            self.assertTrue(self.page._worker.wait(1000))
+            # Native worker completed, but its result has not reached the UI.
+            self.page.general_chat_button.click()
+            self.wait_worker()
+        self.assertNotIn('Запізніла академічна відповідь', self.page.transcript.toPlainText())
+        self.assertEqual(self.page._history, [])
+        self.assertFalse(self.page.apply_button.isEnabled())
+        self.page.study_chat_button.click()
+        self.assertEqual(self.page.question.toPlainText(), 'Запит для НМТ')
+
+    def test_language_switch_discards_queued_reply_and_preserves_old_draft_for_return(self):
+        self.unlock()
+        self.page.question.setPlainText('Поясни українською')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Відповідь зі старою мовою'):
+            self.page._ask('chat')
+            self.assertTrue(self.page._worker.wait(1000))
+            self.page.reply_language.setCurrentIndex(self.page.reply_language.findData('en'))
+            self.wait_worker()
+        self.assertNotIn('Відповідь зі старою мовою', self.page.transcript.toPlainText())
+        self.assertEqual(self.page._history, [])
+        self.page.reply_language.setCurrentIndex(self.page.reply_language.findData('auto'))
+        self.assertEqual(self.page.question.toPlainText(), 'Поясни українською')
+
+    def test_note_proposal_explicitly_returns_to_study_mode_and_survives_navigation(self):
+        self.unlock()
+        self.page.note_body.setPlainText('Початковий конспект')
+        self.page.general_chat_button.click()
+        entered, release = threading.Event(), threading.Event()
+
+        def ask(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return 'Структурований конспект'
+
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', side_effect=ask) as mock_ask:
+            try:
+                self.page._ask('structure')
+                self.assertTrue(entered.wait(1))
+                self.page.hide()
+                self.app.processEvents()
+                release.set()
+                self.wait_worker()
+            finally:
+                release.set()
+        self.page.show()
+        self.app.processEvents()
+        self.assertEqual(mock_ask.call_args.kwargs['mode'], 'study')
+        self.assertEqual(mock_ask.call_args.args[0], 'math')
+        self.assertTrue(self.page.apply_button.isEnabled())
+        self.page._apply_answer()
+        self.assertEqual(self.page.note_body.toPlainText(), 'Структурований конспект')

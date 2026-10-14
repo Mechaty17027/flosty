@@ -3,6 +3,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import threading
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -21,6 +22,11 @@ class MainUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.environment = patch.dict(os.environ, {'APPDATA': self.folder.name, 'LOCALAPPDATA': self.folder.name})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.items = [
             {'name': 'Alpha', 'path': 'C:/Apps/alpha.exe'},
             {'name': 'Beta', 'path': 'C:/Apps/beta.exe'},
@@ -66,7 +72,7 @@ class MainUiTests(unittest.TestCase):
         launch.assert_called_once_with('C:/Apps/alpha.exe')
 
     def test_new_sections_keep_overview_and_details_separate(self):
-        self.assertEqual(self.window.stack.count(), 9)
+        self.assertEqual(self.window.stack.count(), 11)
         self.assertEqual(self.window.dashboard_tabs.count(), 2)
         self.assertEqual(self.window.program_tabs.count(), 2)
         self.assertEqual(self.window.file_tabs.count(), 2)
@@ -74,6 +80,19 @@ class MainUiTests(unittest.TestCase):
             self.window._navigate(4)
         activate.assert_called_once()
         self.assertIs(self.window.stack.currentWidget(), self.window.internet_page)
+
+    def test_catalogue_and_coding_are_independent_navigation_sections(self):
+        self.window._navigate(8)
+        self.assertIs(self.window.stack.currentWidget(), self.window.cash_registers_page)
+        self.window._navigate(9)
+        self.assertIs(self.window.stack.currentWidget(), self.window.programming_page)
+        self.assertIn('Програмування', self.window.page_title.text())
+
+    def test_failed_code_save_prevents_navigation(self):
+        self.window._navigate(9)
+        with patch.object(self.window.programming_page, 'can_leave', return_value=False):
+            self.window._navigate(0)
+        self.assertIs(self.window.stack.currentWidget(), self.window.programming_page)
 
     def test_failed_save_preserves_memory_and_visible_list(self):
         with patch('mechahub.ui.main_window.write_shortcuts', side_effect=OSError('read only')), \
