@@ -51,7 +51,7 @@ def _self_check(app: QApplication, window: MainWindow) -> None:
 
     def begin():
         window._navigate(4)
-        view = window.internet_page.current_view()
+        view = window.internet_page.new_tab(home=False)
         if view is None:
             finish(1)
             return
@@ -70,6 +70,10 @@ def _self_check(app: QApplication, window: MainWindow) -> None:
             )
 
         view.loadFinished.connect(loaded)
+        # Register first, then trigger a fresh local load: the home page may
+        # already have completed while the browser was being activated.
+        view.setHtml('<!doctype html><html><head><title>MechaHub</title></head>'
+                     '<body>Нова вкладка · MechaHub self-check</body></html>')
 
     timer.timeout.connect(lambda: finish(1))
     timer.start(20000)

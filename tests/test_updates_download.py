@@ -29,7 +29,9 @@ class ArtifactResponse(io.BytesIO):
 class ArtifactDownloadTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.folder = Path(self.temporary.name)
+        # Windows runners may expose TEMP through an 8.3 alias (RUNNER~1).
+        # The downloader returns canonical paths, so fixtures use the same form.
+        self.folder = Path(self.temporary.name).resolve()
         self.addCleanup(self.temporary.cleanup)
         self.payload = b'Mocked release artifact\x00\x01\xff'
 
