@@ -130,6 +130,110 @@ class StudyAITests(unittest.TestCase):
         self.assertNotIn('private', str(caught.exception))
         connection.close.assert_called_once()
 
+    def test_memory_error_has_actionable_advice_without_reflected_prompt(self):
+        with self.assertRaises(study_ai.StudyAIError) as caught:
+            self.ask(Response({'error': 'model requires more system memory; Private notes'}, status=500))
+        self.assertIn('qwen3:1.7b', str(caught.exception))
+        self.assertNotIn('Private', str(caught.exception))
+
+    def test_unsupported_model_advises_updating_runtime(self):
+        with self.assertRaises(study_ai.StudyAIError) as caught:
+            self.ask(Response({'error': 'model requires a newer version of Ollama'}, status=400))
+        self.assertIn('Онови Ollama', str(caught.exception))
+
+    def test_streaming_pull_validates_download_and_reports_progress(self):
+        events = [{'status': 'pulling manifest'}, {'status': 'pulling weights', 'total': 100},
+                  {'status': 'pulling weights', 'total': 100, 'completed': 75}, {'status': 'success'}]
+        response = Response(b''.join(json.dumps(item).encode() + b'\n' for item in events))
+        connections = [Mock(), Mock(), Mock()]
+        for connection, value in zip(connections, (response, Response({}), Response({'models': [{'name': 'qwen3:4b'}]}))):
+            connection.getresponse.return_value = value
+        reports = []
+        with patch.object(study_ai, 'HTTPConnection', side_effect=connections):
+            self.assertEqual(self.client.pull_model(progress=reports.append), ['qwen3:4b'])
+        self.assertEqual(connections[0].request.call_args.args[:2], ('POST', '/api/pull'))
+        payload = json.loads(connections[0].request.call_args.kwargs['body'])
+        self.assertEqual(payload, {'model': 'qwen3:4b', 'stream': True, 'insecure': False})
+        self.assertNotIn('messages', payload)
+        self.assertEqual(reports[1]['completed'], 0)
+        self.assertEqual(reports[2]['completed'], 75)
+        self.assertTrue(response.closed)
+        for connection in connections:
+            connection.close.assert_called_once()
+
+    def test_pull_rejects_incomplete_invalid_cloud_and_failed_download(self):
+        cases = [b'{"status":"pulling manifest"}\n', b'bad json\n', b'[]\n',
+                 b'{"error":"private reflected error"}\n', b'{"status":"pulling", "total":5,"completed":6}\n',
+                 b'{"status":"pulling", "total":true,"completed":0}\n', b'x' * (study_ai.MAX_PROGRESS_LINE + 1),
+                 b'{"status":"success"}\n{"status":"pulling"}\n']
+        for value in cases:
+            response = Response(value)
+            connection = Mock()
+            connection.getresponse.return_value = response
+            with self.subTest(value=value[:50]), patch.object(study_ai, 'HTTPConnection', return_value=connection), \
+                    self.assertRaises(study_ai.StudyAIError) as caught:
+                self.client.pull_model()
+            self.assertNotIn('private', str(caught.exception))
+            self.assertTrue(response.closed)
+        connections = [Mock(), Mock()]
+        connections[0].getresponse.return_value = Response(b'{"status":"success"}')
+        connections[1].getresponse.return_value = Response({'remote_model': 'alias'})
+        with patch.object(study_ai, 'HTTPConnection', side_effect=connections), self.assertRaises(study_ai.StudyAIError):
+            self.client.pull_model()
+
+    def test_pull_canonicalizes_untagged_name_and_checks_cancel_before_network(self):
+        client = study_ai.StudyAIClient(study_ai.AISettings(model='qwen3'))
+        connection = Mock()
+        connection.getresponse.return_value = Response(b'{"status":"success"}')
+        with patch.object(study_ai, 'HTTPConnection', return_value=connection), \
+                patch.object(client, '_verify_local_model'), patch.object(client, 'list_models', return_value=['qwen3:latest']):
+            self.assertEqual(client.pull_model(), ['qwen3:latest'])
+        cancel = threading.Event()
+        cancel.set()
+        with patch.object(study_ai, 'HTTPConnection') as factory, self.assertRaises(study_ai.StudyAICancelled):
+            client.pull_model(cancel=cancel)
+        factory.assert_not_called()
+
+    def test_pull_cancellation_interrupts_a_real_socket(self):
+        started, release, cancel = threading.Event(), threading.Event(), threading.Event()
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.end_headers()
+                self.wfile.write(b'{"status":"pulling manifest"}\n')
+                self.wfile.flush()
+                started.set()
+                release.wait(3)
+            def log_message(self, *args):
+                pass
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        errors = []
+        client = study_ai.StudyAIClient(study_ai.AISettings(base_url=f'http://127.0.0.1:{server.server_port}'))
+        def pull():
+            try:
+                client.pull_model(cancel=cancel)
+            except Exception as error:
+                errors.append(error)
+        worker = threading.Thread(target=pull, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(2))
+            cancel.set()
+            worker.join(timeout=1.5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], study_ai.StudyAICancelled)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+            server_thread.join(timeout=2)
+
     def test_pre_cancelled_request_does_not_connect(self):
         cancel = threading.Event()
         cancel.set()

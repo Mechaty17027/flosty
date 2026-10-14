@@ -16,7 +16,9 @@ from .study import MAX_BODY_LENGTH, SUBJECTS
 DEFAULT_MODEL = 'qwen3:4b'
 DEFAULT_BASE_URL = 'http://127.0.0.1:11434'
 CONNECT_TIMEOUT = 3.0
-REQUEST_TIMEOUT = 120.0
+REQUEST_TIMEOUT = 600.0
+MODEL_DOWNLOAD_TIMEOUT = 3600.0
+MAX_PROGRESS_LINE = 64 * 1024
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_REPLY_LENGTH = 32_000
@@ -26,6 +28,10 @@ _MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 
 class StudyAIError(ValueError):
     """Invalid input or a local AI service problem, without exposing private prompts."""
+
+
+class StudyAIConnectionError(StudyAIError):
+    """The local runtime is unreachable; setup can offer to start it."""
 
 
 class StudyAICancelled(Exception):
@@ -175,6 +181,26 @@ class StudyAIClient:
             if response.status == 404 and path in {'/api/chat', '/api/show'}:
                 raise StudyAIError(f'Модель {self.model} не знайдена. Встанови її командою ollama pull {self.model}.')
             if response.status != 200:
+                # Interpret only known diagnostics, never echo a server's raw body.
+                error_body = bytearray()
+                while len(error_body) <= 8192:
+                    _check_cancel(cancel)
+                    chunk = response.read1(min(2048, 8193 - len(error_body)))
+                    if not chunk:
+                        break
+                    error_body.extend(chunk)
+                diagnostic = ''
+                if len(error_body) <= 8192:
+                    try:
+                        error_data = json.loads(error_body.decode('utf-8'))
+                        if isinstance(error_data, dict) and isinstance(error_data.get('error'), str):
+                            diagnostic = error_data['error'].lower()
+                    except (ValueError, UnicodeError):
+                        pass
+                if any(word in diagnostic for word in ('out of memory', 'more system memory', 'not enough memory', 'unable to allocate', 'insufficient memory')):
+                    raise StudyAIError('Для цієї моделі бракує пам’яті. Закрий зайві програми або вибери й завантаж qwen3:1.7b у вкладці «Безоплатний ШІ».')
+                if any(word in diagnostic for word in ('not supported', 'unsupported', 'newer version', 'not support')):
+                    raise StudyAIError('Ollama не підтримує цю модель або параметри запиту. Онови Ollama з офіційного сайту й повтори спробу.')
                 raise StudyAIError(f'Локальний Ollama повернув помилку HTTP {response.status}. Перевір службу й вибрану модель.')
             length = response.getheader('Content-Length')
             declared_size = None
@@ -214,7 +240,7 @@ class StudyAIClient:
             _check_cancel(cancel)
             if time.monotonic() >= deadline:
                 raise StudyAIError('Ollama не встиг відповісти. Спробуй меншу модель або коротший запит.') from error
-            raise StudyAIError('Не вдалося зв’язатися з локальним Ollama. Запусти Ollama й перевір адресу служби.') from error
+            raise StudyAIConnectionError('Не вдалося зв’язатися з локальним Ollama. Запусти Ollama у вкладці «Безоплатний ШІ»; якщо вона не встановлена, завантаж її з офіційного сайту.') from error
         finally:
             if response is not None:
                 response.close()
@@ -239,6 +265,98 @@ class StudyAIClient:
             except StudyAIError:
                 continue
         return sorted(result)
+
+    def pull_model(self, cancel: threading.Event | None = None, *, progress=None) -> list[str]:
+        """Ask the local runtime to download a model, reporting bounded NDJSON events.
+
+        Only the model name leaves MechaHub; Ollama downloads model weights itself.
+        Closing this stream cancels this request without killing a shared service.
+        """
+        _check_cancel(cancel)
+        body = json.dumps({'model': self.model, 'stream': True, 'insecure': False}).encode('utf-8')
+        connection = HTTPConnection(self._host, self._port, timeout=CONNECT_TIMEOUT)
+        interruptible = response = None
+        deadline = time.monotonic() + MODEL_DOWNLOAD_TIMEOUT
+        try:
+            connection.connect()
+            _check_cancel(cancel)
+            if connection.sock is not None:
+                interruptible = _InterruptibleSocket(connection.sock, cancel, deadline)
+                connection.sock = interruptible
+            connection.request('POST', '/api/pull', body=body,
+                               headers={'Content-Type': 'application/json', 'Accept': 'application/x-ndjson'})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise StudyAIError(f'Не вдалося завантажити модель (HTTP {response.status}). Перевір Ollama та назву моделі.')
+            pending = bytearray()
+            received = 0
+            success = False
+
+            def event(raw):
+                nonlocal success
+                if not raw.strip():
+                    return
+                try:
+                    data = json.loads(raw.decode('utf-8'))
+                except (ValueError, UnicodeError) as error:
+                    raise StudyAIError('Ollama повернув некоректний стан завантаження.') from error
+                if not isinstance(data, dict) or data.get('error'):
+                    raise StudyAIError('Ollama не зміг завантажити модель. Перевір назву, інтернет і вільне місце на диску.')
+                status = data.get('status')
+                if not isinstance(status, str) or not status or len(status) > 1000:
+                    raise StudyAIError('Ollama повернув некоректний стан завантаження.')
+                total, completed = data.get('total'), data.get('completed', 0 if 'total' in data else None)
+                if total is not None or completed is not None:
+                    if (type(total) is not int or type(completed) is not int
+                            or not 0 <= completed <= total <= 1024 ** 4):
+                        raise StudyAIError('Ollama повернув некоректний прогрес завантаження.')
+                if success:
+                    raise StudyAIError('Ollama надіслав дані після завершення завантаження.')
+                success = status == 'success'
+                if progress is not None:
+                    progress({'status': status, 'total': total, 'completed': completed})
+
+            while True:
+                _check_cancel(cancel)
+                if time.monotonic() >= deadline:
+                    raise StudyAIError('Завантаження моделі триває надто довго. Повтори його пізніше.')
+                chunk = response.read1(16 * 1024)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > 64 * 1024 * 1024:
+                    raise StudyAIError('Ollama надіслав надто багато повідомлень прогресу.')
+                pending.extend(chunk)
+                while b'\n' in pending:
+                    end = pending.index(b'\n')
+                    if end > MAX_PROGRESS_LINE:
+                        raise StudyAIError('Повідомлення прогресу Ollama надто велике.')
+                    raw = bytes(pending[:end])
+                    del pending[:end + 1]
+                    event(raw)
+                if len(pending) > MAX_PROGRESS_LINE:
+                    raise StudyAIError('Повідомлення прогресу Ollama надто велике.')
+            if pending:
+                event(bytes(pending))
+            _check_cancel(cancel)
+            if not success:
+                raise StudyAIError('Завантаження моделі обірване. Спробуй ще раз; Ollama повторно використає завантажені частини.')
+        except (OSError, HTTPException) as error:
+            _check_cancel(cancel)
+            raise StudyAIError('Немає з’єднання з Ollama. Запусти її та повтори завантаження моделі.') from error
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
+            if interruptible is not None:
+                interruptible.close()
+        self._verify_local_model(cancel)
+        models = self.list_models(cancel)
+        # Ollama canonicalizes an untagged model as name:latest.
+        canonical = self.model if ':' in self.model.rsplit('/', 1)[-1] else self.model + ':latest'
+        if self.model not in models and canonical not in models:
+            raise StudyAIError('Модель ще не готова. Повтори перевірку підключення.')
+        return models
 
     def _verify_local_model(self, cancel):
         # Aliases can conceal remote models. Send only the model name to this probe.

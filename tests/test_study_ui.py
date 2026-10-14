@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from mechahub.core.study import StudyVault
+from mechahub.core.study_ai import StudyAIConnectionError, StudyAIError
 from mechahub.ui.study_page import StudyPage
 
 
@@ -25,8 +26,8 @@ class StudyUiTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.path = Path(self.folder.name) / 'study.vault'
-        settings = QSettings(str(Path(self.folder.name) / 'settings.ini'), QSettings.Format.IniFormat)
-        self.page = StudyPage(vault_path=self.path, settings=settings)
+        self.settings = QSettings(str(Path(self.folder.name) / 'settings.ini'), QSettings.Format.IniFormat)
+        self.page = StudyPage(vault_path=self.path, settings=self.settings)
         self.page.show()
         self.app.processEvents()
 
@@ -190,3 +191,158 @@ class StudyUiTests(unittest.TestCase):
     def test_cloud_model_is_not_suggested_as_a_download_command(self):
         self.page.model.setCurrentText('gpt-oss:120b-cloud')
         self.assertNotIn('ollama pull', self.page.model_command.text())
+
+    def test_failed_ai_request_preserves_question_and_shows_error_in_chat(self):
+        self.unlock()
+        question = 'Поясни квадратні рівняння та наведи приклад'
+        error = 'Немає з’єднання з Ollama. Встанови й запусти її.'
+        self.page.question.setPlainText(question)
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', side_effect=StudyAIConnectionError(error)):
+            self.page._ask('chat')
+            self.wait_worker()
+        self.assertEqual(self.page.question.toPlainText(), question)
+        self.assertIn(error, self.page.transcript.toPlainText())
+        self.assertIn(error, self.page.chat_ai_status.text())
+        self.assertTrue(self.page.chat_ai_status.isVisible())
+        self.assertTrue(self.page.send_button.isEnabled())
+        self.page.setup_button.click()
+        self.assertEqual(self.page.tabs.tabText(self.page.tabs.currentIndex()), 'Безоплатний ШІ')
+
+    def test_success_keeps_new_question_written_while_ai_was_working(self):
+        self.unlock()
+        entered, release = threading.Event(), threading.Event()
+
+        def ask(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return 'Відповідь на перше запитання'
+
+        self.page.question.setPlainText('Перше запитання')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', side_effect=ask):
+            try:
+                self.page._ask('chat')
+                self.assertTrue(entered.wait(1))
+                self.page.question.setPlainText('Нова чернетка під час очікування')
+                release.set()
+                self.wait_worker()
+            finally:
+                release.set()
+        self.assertEqual(self.page.question.toPlainText(), 'Нова чернетка під час очікування')
+        self.assertIn('Відповідь на перше запитання', self.page.transcript.toPlainText())
+
+    def test_success_clears_only_the_question_that_received_an_answer(self):
+        self.unlock()
+        self.page.question.setPlainText('Поясни правило')
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', return_value='Пояснення правила'):
+            self.page._ask('chat')
+            self.wait_worker()
+        self.assertEqual(self.page.question.toPlainText(), '')
+        self.assertIn('Пояснення правила', self.page.transcript.toPlainText())
+
+    def test_cancelled_request_finishes_with_stopped_status_and_preserves_question(self):
+        self.unlock()
+        entered = threading.Event()
+
+        def ask(*args, cancel=None, **kwargs):
+            entered.set()
+            cancel.wait(2)
+            return 'Скасована відповідь'
+
+        question = 'Поясни дроби'
+        self.page.question.setPlainText(question)
+        with patch('mechahub.ui.study_page.StudyAIClient.ask', side_effect=ask):
+            self.page._ask('chat')
+            self.assertTrue(entered.wait(1))
+            self.page._stop()
+            self.wait_worker()
+        self.assertIn('зупинено', self.page.status.text().lower())
+        self.assertIn('зупинено', self.page.chat_ai_status.text().lower())
+        self.assertEqual(self.page.question.toPlainText(), question)
+        self.assertNotIn('Скасована відповідь', self.page.transcript.toPlainText())
+        self.assertTrue(self.page.send_button.isEnabled())
+        self.assertFalse(self.page.stop_button.isEnabled())
+
+    def test_probe_uses_installed_model_when_default_is_missing_and_no_explicit_choice(self):
+        self.unlock()
+        self.assertFalse(self.settings.contains('study/model'))
+        with patch('mechahub.ui.study_page.StudyAIClient.list_models', return_value=['llama3.2:3b']) as probe:
+            self.page._probe()
+            self.wait_worker()
+        probe.assert_called_once()
+        self.assertEqual(self.page.model.currentText(), 'llama3.2:3b')
+        self.assertIn('готова', self.page.ai_status.text())
+        self.assertIn('llama3.2:3b', self.page.chat_ai_status.text())
+
+    def test_probe_preserves_explicit_saved_model_choice_even_if_not_installed(self):
+        self.page.close()
+        self.page.deleteLater()
+        self.app.processEvents()
+        self.settings.setValue('study/model', 'qwen3:8b')
+        self.page = StudyPage(vault_path=self.path, settings=self.settings)
+        self.page.show()
+        self.app.processEvents()
+        self.unlock()
+        with patch('mechahub.ui.study_page.StudyAIClient.list_models', return_value=['llama3.2:3b']):
+            self.page._probe()
+            self.wait_worker()
+        self.assertEqual(self.page.model.currentText(), 'qwen3:8b')
+        self.assertIn('ще не завантажена', self.page.ai_status.text())
+        self.assertIn('Завантажити вибрану модель', self.page.chat_ai_status.text())
+
+    def test_download_model_reports_progress_then_marks_model_ready(self):
+        self.unlock()
+        self.page.tabs.setCurrentIndex(3)
+        entered, release = threading.Event(), threading.Event()
+        model = self.page.model.currentText()
+
+        def pull(*args, progress=None, **kwargs):
+            progress({'status': 'pulling model', 'total': 100 * 1024 ** 2, 'completed': 50 * 1024 ** 2})
+            entered.set()
+            release.wait(2)
+            progress({'status': 'success', 'total': None, 'completed': None})
+            return [model]
+
+        with patch('mechahub.ui.study_page.StudyAIClient.list_models', return_value=[]), \
+                patch('mechahub.ui.study_page.StudyAIClient.pull_model', side_effect=pull) as download, \
+                patch('mechahub.ui.study_page.start_ollama') as start:
+            try:
+                self.page._download_model()
+                self.assertTrue(entered.wait(1))
+                QTest.qWait(20)
+                self.assertTrue(self.page.model_progress.isVisible())
+                self.assertEqual(self.page.model_progress.value(), 50)
+                self.assertFalse(self.page.download_model_button.isEnabled())
+                self.assertTrue(self.page.setup_stop_button.isEnabled())
+                release.set()
+                self.wait_worker()
+                download.assert_called_once()
+                start.assert_not_called()
+            finally:
+                release.set()
+        self.assertTrue(self.page.model_progress.isHidden())
+        self.assertTrue(self.page.download_model_button.isEnabled())
+        self.assertIn('готова', self.page.ai_status.text())
+        self.assertIn(model, self.page.chat_ai_status.text())
+
+    def test_start_service_when_ollama_is_missing_shows_install_hint_without_external_execution(self):
+        self.unlock()
+        self.page.tabs.setCurrentIndex(3)
+        message = 'Ollama не встановлена. Встанови Ollama для Windows і спробуй знову.'
+        with patch('mechahub.ui.study_page.StudyAIClient.list_models',
+                   side_effect=StudyAIConnectionError('Немає з’єднання')), \
+                patch('mechahub.ui.study_page.start_ollama', side_effect=OSError(message)) as start:
+            self.page._start_service()
+            self.wait_worker()
+            start.assert_called_once()
+        self.assertIn(message, self.page.ai_status.text())
+        self.assertIn(message, self.page.chat_ai_status.text())
+        self.assertTrue(self.page.start_service_button.isEnabled())
+
+    def test_start_service_reuses_already_running_ollama_without_starting_another_process(self):
+        self.unlock()
+        with patch('mechahub.ui.study_page.StudyAIClient.list_models', return_value=['qwen3:4b']), \
+                patch('mechahub.ui.study_page.start_ollama') as start:
+            self.page._start_service()
+            self.wait_worker()
+            start.assert_not_called()
+        self.assertIn('готова', self.page.ai_status.text())

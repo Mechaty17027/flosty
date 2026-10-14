@@ -3,18 +3,20 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
+import time
 
 from PySide6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea,
     QSplitter, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from mechahub.core.settings import config_file
 from mechahub.core.study import SUBJECTS, StudyVault
-from mechahub.core.study_ai import AISettings, StudyAIClient
+from mechahub.core.study_ai import AISettings, StudyAIClient, StudyAIError, StudyAIConnectionError
+from mechahub.core.study_setup import start_ollama
 from mechahub.core.study_sources import sources_for_subject
 
 
@@ -37,15 +39,17 @@ def button(text, callback, primary=False):
 class StudyWorker(QThread):
     received = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
 
-    def __init__(self, operation, parent=None):
+    def __init__(self, operation, parent=None, *, reports_progress=False):
         super().__init__(parent)
         self.operation = operation
         self.cancel = threading.Event()
+        self.reports_progress = reports_progress
 
     def run(self):
         try:
-            result = self.operation(self.cancel)
+            result = self.operation(self.cancel, self.progress.emit) if self.reports_progress else self.operation(self.cancel)
             if not self.cancel.is_set():
                 self.received.emit(result)
         except Exception as error:
@@ -189,6 +193,10 @@ class StudyPage(QWidget):
         page = QWidget()
         root = QVBoxLayout(page)
         root.addWidget(label('Став запитання, тренуй завдання НМТ або розбирай помилки. Звіряй пояснення з навчальними джерелами.'))
+        self.chat_ai_status = label('Перед першим запитом налаштуй Ollama та завантаж локальну модель.')
+        root.addWidget(self.chat_ai_status)
+        self.setup_button = button('Налаштувати ШІ', lambda: self.tabs.setCurrentIndex(3))
+        root.addWidget(self.setup_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.transcript = QTextEdit()
         self.transcript.setReadOnly(True)
         root.addWidget(self.transcript, 1)
@@ -241,8 +249,10 @@ class StudyPage(QWidget):
         page = QWidget()
         root = QVBoxLayout(page)
         root.addWidget(label('Локальний ШІ без оплати API', 'AccentTitle'))
-        root.addWidget(label('1. Встанови Ollama для Windows.\n2. Завантаж модель командою нижче в PowerShell.\n3. Залиш Ollama запущеною та натисни «Перевірити підключення».'))
+        root.addWidget(label('1. Один раз встанови Ollama для Windows за офіційним посиланням.\n2. Натисни «Запустити Ollama».\n3. Вибери модель й натисни «Завантажити вибрану модель». Після завершення можна спілкуватися з ШІ.'))
         root.addWidget(button('Відкрити завантаження Ollama', lambda: self.open_source.emit('https://ollama.com/download/windows')))
+        self.start_service_button = button('Запустити Ollama', self._start_service)
+        root.addWidget(self.start_service_button)
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.addItems(['qwen3:4b', 'qwen3:1.7b', 'qwen3:8b'])
@@ -255,7 +265,16 @@ class StudyPage(QWidget):
         self.model.currentTextChanged.connect(self._model_changed)
         root.addWidget(self.model_command)
         root.addWidget(button('Скопіювати команду завантаження', lambda: QApplication.clipboard().setText(self.model_command.text())))
-        root.addWidget(label('qwen3:4b займає приблизно 2,5 ГБ для завантаження; робота потребує додаткової RAM. Для слабшого ПК можна вибрати 1.7b. Модель завантажується один раз, після цього чат працює локально.'))
+        root.addWidget(label('qwen3:4b: приблизно 2,5 ГБ; qwen3:1.7b: приблизно 1,4 ГБ для слабшого ПК. Для роботи потрібна додаткова RAM. Завантаження потребує інтернету; після нього чат працює локально. Перший запуск моделі може тривати кілька хвилин.'))
+        self.download_model_button = button('Завантажити вибрану модель', self._download_model, True)
+        root.addWidget(self.download_model_button)
+        self.model_progress = QProgressBar()
+        self.model_progress.setRange(0, 100)
+        self.model_progress.hide()
+        root.addWidget(self.model_progress)
+        self.setup_stop_button = button('Зупинити операцію', self._stop)
+        self.setup_stop_button.setEnabled(False)
+        root.addWidget(self.setup_stop_button)
         self.probe_button = button('Перевірити підключення', self._probe, True)
         root.addWidget(self.probe_button)
         self.ai_status = label('Ollama: ще не перевірено. Адреса: 127.0.0.1:11434.')
@@ -399,14 +418,15 @@ class StudyPage(QWidget):
     def _client(self):
         return StudyAIClient(AISettings(model=self.model.currentText().strip()))
 
-    def _start_worker(self, operation, callback):
+    def _start_worker(self, operation, callback, *, reports_progress=False):
         if self._worker is not None or not self.vault.unlocked:
             return False
         generation = self._generation
-        worker = StudyWorker(operation, self)
+        worker = StudyWorker(operation, self, reports_progress=reports_progress)
         self._worker = worker
         worker.received.connect(lambda result: callback(result) if generation == self._generation and self.vault.unlocked else None)
         worker.failed.connect(lambda message: self._ai_failed(message) if generation == self._generation and self.vault.unlocked else None)
+        worker.progress.connect(lambda data: self._model_progress(data) if generation == self._generation and self.vault.unlocked else None)
         worker.finished.connect(self._worker_finished)
         self._set_busy(True)
         worker.start()
@@ -418,15 +438,76 @@ class StudyPage(QWidget):
         except Exception as error:
             self._ai_failed(str(error))
             return
-        def received(models):
-            current = self.model.currentText()
-            for model in models:
-                if self.model.findText(model) < 0:
-                    self.model.addItem(model)
-            self.ai_status.setText('Ollama працює. Модель готова.' if current in models else 'Ollama працює. Завантаж вибрану модель командою вище.')
-            self.status.setText(self.ai_status.text())
-        if self._start_worker(lambda cancel: client.list_models(cancel=cancel), received):
+        if self._start_worker(lambda cancel: client.list_models(cancel=cancel), self._models_received):
             self.ai_status.setText('Перевірка Ollama…')
+
+    def _models_received(self, models):
+        current = self.model.currentText().strip()
+        for model in models:
+            if self.model.findText(model) < 0:
+                self.model.addItem(model)
+        canonical = current if ':' in current.rsplit('/', 1)[-1] else current + ':latest'
+        if current not in models and canonical not in models and models and not self.settings.contains('study/model'):
+            current = next((name for name in ('qwen3:4b', 'qwen3:1.7b') if name in models), models[0])
+            self.model.setCurrentText(current)
+            canonical = current
+        ready = current in models or canonical in models
+        message = (f'Ollama працює. Модель {current} готова — можна ставити запитання.' if ready else
+                   f'Ollama працює, але модель {current} ще не завантажена. Натисни «Завантажити вибрану модель» або вибери встановлену зі списку.')
+        self.ai_status.setText(message)
+        self.chat_ai_status.setText(message)
+        self.status.setText(message)
+
+    @staticmethod
+    def _ensure_service(client, cancel):
+        try:
+            return client.list_models(cancel=cancel)
+        except StudyAIConnectionError:
+            start_ollama()
+        deadline = time.monotonic() + 30
+        while not cancel.wait(0.3):
+            try:
+                return client.list_models(cancel=cancel)
+            except StudyAIConnectionError:
+                if time.monotonic() >= deadline:
+                    raise StudyAIError('Ollama ще не відповідає. Відкрий її з меню «Пуск», зачекай і повтори перевірку підключення.')
+        from mechahub.core.study_ai import StudyAICancelled
+        raise StudyAICancelled()
+
+    def _start_service(self):
+        try:
+            client = self._client()
+        except Exception as error:
+            self._ai_failed(str(error))
+            return
+        if self._start_worker(lambda cancel: self._ensure_service(client, cancel), self._models_received):
+            self.ai_status.setText('Запускаємо й перевіряємо Ollama…')
+
+    def _download_model(self):
+        try:
+            client = self._client()
+        except Exception as error:
+            self._ai_failed(str(error))
+            return
+        def operation(cancel, progress):
+            self._ensure_service(client, cancel)
+            return client.pull_model(cancel=cancel, progress=progress)
+        if self._start_worker(operation, self._models_received, reports_progress=True):
+            self.model_progress.setRange(0, 0)
+            self.model_progress.show()
+            self.ai_status.setText('Готуємо завантаження моделі…')
+            self.status.setText('Завантаження моделі. Після завершення вона залишиться на цьому ПК.')
+
+    def _model_progress(self, data):
+        total, completed = data.get('total'), data.get('completed')
+        if total:
+            self.model_progress.setRange(0, 100)
+            self.model_progress.setValue(int(completed * 100 / total))
+            message = f'Завантаження частини моделі: {completed / 1024 ** 3:.2f} / {total / 1024 ** 3:.2f} ГБ. Не закривай розділ до завершення.'
+        else:
+            self.model_progress.setRange(0, 0)
+            message = 'Перевірка та підготовка моделі…'
+        self.ai_status.setText(message)
 
     def _ask(self, task):
         if self._worker is not None or not self.vault.unlocked:
@@ -448,10 +529,9 @@ class StudyPage(QWidget):
         if self._start_worker(lambda cancel: client.ask(subject, message, history=history, note_text=note, task=task, sources=sources, cancel=cancel),
                               lambda answer: self._answer_received(message, answer, task, target)):
             self._append_chat('Ти', message)
-            if task == 'chat':
-                self.question.clear()
             self.tabs.setCurrentIndex(1)
-            self.status.setText('ШІ готує відповідь на твоєму ПК…')
+            self.status.setText('ШІ готує відповідь на твоєму ПК. Перший запит може тривати кілька хвилин; його можна зупинити.')
+            self.chat_ai_status.setText(self.status.text())
 
     def _append_chat(self, name, text):
         cursor = self.transcript.textCursor()
@@ -461,6 +541,8 @@ class StudyPage(QWidget):
         self.transcript.ensureCursorVisible()
 
     def _answer_received(self, message, answer, task, target=None):
+        if task == 'chat' and self.question.toPlainText().strip() == message:
+            self.question.clear()
         self._append_chat('ШІ', answer)
         self._history.extend([{'role': 'user', 'content': message}, {'role': 'assistant', 'content': answer}])
         self._history = self._history[-12:]
@@ -468,6 +550,7 @@ class StudyPage(QWidget):
         self._answer_target = target if task in ('structure', 'explain') else None
         self.apply_button.setEnabled(self._answer_matches_editor())
         self.status.setText('Відповідь готова. Перевір її за джерелами та застосуй правки за потреби.')
+        self.chat_ai_status.setText(self.status.text())
 
     def _apply_answer(self):
         if not self._last_answer or not self.vault.unlocked:
@@ -489,22 +572,32 @@ class StudyPage(QWidget):
     def _ai_failed(self, message):
         self.status.setText(message)
         self.ai_status.setText(message + ' Відкрий вкладку «Безоплатний ШІ» для налаштування.')
+        self.chat_ai_status.setText(message)
+        self._append_chat('Не вдалося виконати запит', message)
 
     def _set_busy(self, busy):
-        for control in (self.send_button, self.structure_button, self.explain_button, self.probe_button):
+        for control in (self.send_button, self.structure_button, self.explain_button, self.probe_button,
+                        self.start_service_button, self.download_model_button, self.model):
             control.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
+        self.setup_stop_button.setEnabled(busy)
 
     def _stop(self):
         if self._worker:
             self._worker.cancel.set()
             self.status.setText('Зупиняємо запит…')
             self.stop_button.setEnabled(False)
+            self.setup_stop_button.setEnabled(False)
 
     def _worker_finished(self):
         worker, self._worker = self._worker, None
         if worker:
+            if worker.cancel.is_set() and self.vault.unlocked:
+                self.status.setText('Операцію зупинено. Можна повторити запит або завантаження.')
+                self.ai_status.setText(self.status.text())
+                self.chat_ai_status.setText(self.status.text())
             worker.deleteLater()
+        self.model_progress.hide()
         self._set_busy(False)
         if self._close_pending:
             self.ready_to_close.emit()
