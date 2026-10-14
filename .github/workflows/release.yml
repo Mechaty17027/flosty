@@ -1,0 +1,124 @@
+name: Publish Windows release
+
+on:
+  push:
+    branches: [main]
+    paths: ['mechahub/__init__.py', '.github/workflows/release.yml']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag matching the application version'
+        required: true
+        default: 'v0.5.0'
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MECHAHUB_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      MECHAHUB_REPOSITORY: ${{ github.repository }}
+      MECHAHUB_COMMIT: ${{ github.sha }}
+      MECHAHUB_EVENT: ${{ github.event_name }}
+      MECHAHUB_REF_TYPE: ${{ github.ref_type }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Determine release tag for main
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        shell: pwsh
+        run: |
+          $mechahubReleaseTag = python -c "from tools.make_update_manifest import current_version; print('v' + current_version())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('MECHAHUB_TAG=' + $mechahubReleaseTag.Trim())
+      - name: Validate version tag
+        shell: pwsh
+        run: python tools/make_update_manifest.py --check-tag "$env:MECHAHUB_TAG"
+      - name: Check whether release already exists
+        id: release_status
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $mechahubReleaseProbe = gh release view "$env:MECHAHUB_TAG" --json tagName 2>&1
+          $mechahubProbeExit = $LASTEXITCODE
+          $mechahubProbeText = ($mechahubReleaseProbe | Out-String).Trim()
+          if ($mechahubProbeExit -eq 0) {
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'exists=true'
+            Write-Host ('Release ' + $env:MECHAHUB_TAG + ' already exists; keeping its assets.')
+          } elseif ($mechahubProbeText -match 'release not found') {
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'exists=false'
+          } else {
+            Write-Error ('Cannot check release ' + $env:MECHAHUB_TAG + ': ' + $mechahubProbeText)
+            exit $mechahubProbeExit
+          }
+          exit 0
+      - name: Install dependencies
+        if: steps.release_status.outputs.exists == 'false'
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Check packages and run tests
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -v
+      - name: Build application
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          python tools/make_windows_icon.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name MechaHub --icon build/MechaHub.ico --add-data "assets;assets" main.py
+      - name: Check packaged application
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $mechahubCheck = Start-Process -FilePath (Join-Path $PWD 'dist/MechaHub.exe') -ArgumentList '--self-check' -WindowStyle Hidden -Wait -PassThru
+          if ($mechahubCheck.ExitCode -ne 0) { throw 'Packaged MechaHub self-check failed.' }
+      - name: Build Windows installer
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $mechahubCompiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path -LiteralPath $mechahubCompiler)) { throw 'Inno Setup compiler is unavailable on this Windows runner.' }
+          $mechahubVersion = $env:MECHAHUB_TAG.Substring(1)
+          & $mechahubCompiler ('/DMyAppVersion=' + $mechahubVersion) 'installer/MechaHub.iss'
+      - name: Generate update manifest
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        run: python tools/make_update_manifest.py --repository "$env:MECHAHUB_REPOSITORY" --tag "$env:MECHAHUB_TAG" --artifact dist/MechaHub.exe --output dist/update.json --notes-file RELEASE_NOTES_UK.md
+      - name: Publish release assets
+        if: steps.release_status.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $releaseArguments = @(
+            'release', 'create', $env:MECHAHUB_TAG,
+            'dist/MechaHub.exe', 'dist/MechaHubSetup.exe', 'dist/update.json',
+            '--target', $env:MECHAHUB_COMMIT,
+            '--title', "MechaHub $env:MECHAHUB_TAG",
+            '--notes-file', 'RELEASE_NOTES_UK.md'
+          )
+          if ($env:MECHAHUB_EVENT -eq 'push' -and $env:MECHAHUB_REF_TYPE -eq 'tag') {
+            $releaseArguments += '--verify-tag'
+          }
+          gh @releaseArguments
