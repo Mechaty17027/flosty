@@ -38,7 +38,20 @@ def main() -> int:
     page = ProgrammingPage(workspace_dir=root)
     page.workspace.compiler_executable = str(compiler.resolve())
     page.language.setCurrentText('C++')
-    page.editor.setPlainText('#include <iostream>\n#include <string>\nint main() { std::string name; std::getline(std::cin, name); std::cout << "MECHAHUB_CPP_OK " << name << " 42\\n"; return 0; }\n')
+    page.editor.setPlainText(
+        '#include <iostream>\n#include <string>\n#include <fstream>\n#include "answer.hpp"\n'
+        'int main() { std::string name, marker; std::getline(std::cin, name); '
+        'std::ifstream local("runtime-marker.txt"); std::getline(local, marker); '
+        'if (marker != "SOURCE_CWD") return 2; '
+        'std::cout << "MECHAHUB_CPP_OK " << name << " " << answer() << "\\n"; return 0; }\n'
+    )
+    if not page.save_code(force=True) or page.current_path is None:
+        raise SystemExit('Could not save the actual C++ smoke project.')
+    source = page.current_path
+    (source.parent / 'answer.hpp').write_text('inline int answer() { return 42; }\n', encoding='utf-8')
+    (source.parent / 'runtime-marker.txt').write_text('SOURCE_CWD\n', encoding='utf-8')
+    if ' ' not in str(source) or 'Україна' not in str(source):
+        raise SystemExit('The C++ smoke must retain spaces and Ukrainian characters in its path.')
     page.run_code()
     started = time.monotonic()
     sent = False
@@ -54,8 +67,11 @@ def main() -> int:
         while page.process is not None and time.monotonic() < deadline:
             QTest.qWait(20)
     output = page.output.toPlainText()
-    success = page.process is None and 'MECHAHUB_CPP_OK Привіт 42' in output
+    _, run_command = page.workspace.build_commands(page.profile, source)
+    binary = Path(run_command[0])
+    success = page.process is None and binary.is_file() and 'MECHAHUB_CPP_OK Привіт 42' in output
     proof = {'compiler': str(compiler), 'workspace': str(root), 'success': success,
+             'source': str(source), 'binary': str(binary),
              'status': page.status.text(), 'output': output[:4000]}
     (root / 'proof.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(proof, ensure_ascii=True))

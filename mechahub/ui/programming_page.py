@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from mechahub.core.code_workspace import (
     CodeWorkspace, CodeWorkspaceError, LanguageProfile,
-    find_compiler, find_python, validate_profile,
+    command_working_directory, find_compiler, find_python, validate_profile,
 )
 
 MAX_OUTPUT_CHARS = 200_000
@@ -436,7 +436,8 @@ class ProgrammingPage(QWidget):
         self._decoders = {name: codecs.getincrementaldecoder('utf-8')(errors='replace') for name in ('stdout', 'stderr')}
         process = QProcess(self)
         self.process = process
-        process.setWorkingDirectory(str(self.current_path.parent))
+        process.setWorkingDirectory(str(command_working_directory(self.profile, self.current_path,
+                                                                  self._run_command, phase)))
         environment = QProcessEnvironment.systemEnvironment()
         path = environment.value('PATH')
         environment.insert('PATH', os.pathsep.join([*self._tool_directories, path]))

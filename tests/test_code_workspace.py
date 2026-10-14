@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from mechahub.core.code_workspace import (
     CodeWorkspace, CodeWorkspaceError, DEFAULT_PROFILES, LanguageProfile,
-    MAX_CODE_BYTES, RuntimeTool, find_python, validate_profile,
+    MAX_CODE_BYTES, RuntimeTool, command_working_directory, find_python, validate_profile,
 )
 
 
@@ -95,8 +95,35 @@ class CodeWorkspaceTests(unittest.TestCase):
                                                               compiler=RuntimeTool(Path(sys.executable)))
         self.assertIn(str(path), compile_command)
         self.assertIn('-std=c++17', compile_command)
-        self.assertEqual(compile_command[compile_command.index('-o') + 1], run[0])
+        self.assertEqual(compile_command[compile_command.index('-o') + 1], Path(run[0]).name)
         self.assertTrue(Path(run[0]).parent.is_relative_to(self.root / 'builds'))
+
+    def test_builtin_cpp_unicode_output_uses_ascii_basename_and_correct_directories(self):
+        workspace = CodeWorkspace(self.root / 'Cpp smoke Україна з пробілами')
+        source = workspace.create_project(DEFAULT_PROFILES[1], 'Мій проєкт')
+        compile_command, run = workspace.build_commands(DEFAULT_PROFILES[1], source,
+                                                        compiler=RuntimeTool(Path(sys.executable)))
+        output_argument = compile_command[compile_command.index('-o') + 1]
+        self.assertTrue(output_argument.isascii())
+        self.assertEqual(output_argument, Path(run[0]).name)
+        self.assertNotIn(str(workspace.root), output_argument)
+        self.assertTrue(Path(run[0]).is_absolute())
+        self.assertEqual(command_working_directory(DEFAULT_PROFILES[1], source, run, 'compile'), Path(run[0]).parent)
+        self.assertEqual(command_working_directory(DEFAULT_PROFILES[1], source, run, 'run'), source.parent)
+
+    def test_custom_cpp_profile_output_placeholder_and_compile_cwd_are_unchanged(self):
+        workspace = CodeWorkspace(self.root / 'Власний compiler workspace')
+        custom = LanguageProfile('Own C++', '.cpp', ('{output}',), DEFAULT_PROFILES[1].compile)
+        source = workspace.create_project(custom)
+        compile_command, run = workspace.build_commands(custom, source, compiler=RuntimeTool(Path(sys.executable)))
+        self.assertEqual(compile_command[compile_command.index('-o') + 1], run[0])
+        self.assertEqual(command_working_directory(custom, source, run, 'compile'), source.parent)
+        # Even a manually changed built-in name keeps the user's custom command.
+        customized = LanguageProfile('C++', '.cpp', ('{output}',),
+                                     ('{compiler}', '{file}', '-o', '{output}'))
+        compile_command, run = workspace.build_commands(customized, source, compiler=RuntimeTool(Path(sys.executable)))
+        self.assertEqual(compile_command[compile_command.index('-o') + 1], run[0])
+        self.assertEqual(command_working_directory(customized, source, run, 'compile'), source.parent)
 
     def test_missing_runtime_and_compiler_produce_clear_errors(self):
         path = self.workspace.create_project(DEFAULT_PROFILES[0])

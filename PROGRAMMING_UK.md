@@ -16,7 +16,7 @@
 4. У вкладці **«Вивід»** введи ім’я в нижньому полі й натисни Enter або «Надіслати».
 5. «Зупинити» завершує запущений проєкт. Перехід до іншого розділу зберігає код; при закритті хабу його власні активні процеси припиняються.
 
-Windows-реліз включає окремий [Python 3.14.8 зі стандартною бібліотекою](https://www.python.org/downloads/release/python-3148/). Він не змінює встановлений у Windows Python. Для `pip`, Tkinter та сторонніх пакетів установи звичайний Python і обери його `python.exe` через **«Інструмент…» → «Вибрати виконуваний файл…»**. Особливості приватного runtime описано в [документації Python](https://docs.python.org/3/using/windows.html#the-embeddable-package).
+Windows-реліз включає окремий [Python 3.14.8 зі стандартною бібліотекою](https://www.python.org/downloads/release/python-3148/). Він не змінює встановлений у Windows Python. Для `pip`, Tkinter та сторонніх пакетів установи звичайний Python і обери його `python.exe` через **«Інструмент…» → «Вибрати виконуваний файл…»**. Особливості вбудованого Python описано в [документації Python](https://docs.python.org/3/using/windows.html#the-embeddable-package).
 
 ## C++
 

@@ -2,6 +2,7 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -12,7 +13,7 @@ from unittest.mock import patch
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from mechahub.core.code_workspace import CodeWorkspaceError, LanguageProfile
+from mechahub.core.code_workspace import CodeWorkspace, CodeWorkspaceError, LanguageProfile, RuntimeTool
 from mechahub.ui.programming_page import MAX_OUTPUT_CHARS, ProgrammingPage
 
 
@@ -143,6 +144,31 @@ class ProgrammingUiTests(unittest.TestCase):
             self.wait_finished()
         self.assertEqual(launch.call_count, 1)
         self.assertIn('COMPILE ERROR', self.page.output.toPlainText())
+        self.assertIn('кодом 7', self.page.status.text())
+
+    def test_builtin_cpp_qprocess_receives_unicode_build_cwd_and_ascii_linker_name(self):
+        self.page.workspace = CodeWorkspace(self.root / 'Cpp smoke Україна із пробілами')
+        self.page.language.setCurrentIndex(self.page.language.findText('C++'))
+        driver = self.root / 'fake compiler.py'
+        driver.write_text(
+            'import json,os,sys\nfrom pathlib import Path\n'
+            'source=Path(sys.argv[sys.argv.index("-x")+2])\n'
+            '(source.parent/"compiler-observation.json").write_text('
+            'json.dumps({"cwd":os.getcwd(),"arguments":sys.argv[1:]},ensure_ascii=False),encoding="utf8")\n'
+            'print("Compiler cwd recorded",flush=True)\nsys.exit(7)\n', encoding='utf8')
+        tool = RuntimeTool(Path(sys.executable), ('-u', '-X', 'utf8', str(driver)))
+        self.code('int main() { return 0; }\n')
+        with patch('mechahub.core.code_workspace.find_compiler', return_value=tool), \
+                patch.object(self.page, '_launch', wraps=self.page._launch) as launched:
+            self.page.run_code()
+            self.wait_finished()
+        observation = json.loads((self.page.current_path.parent / 'compiler-observation.json').read_text(encoding='utf8'))
+        _compile, run = self.page.workspace.build_commands(self.page.profile, self.page.current_path, compiler=tool)
+        self.assertEqual(Path(observation['cwd']), Path(run[0]).parent)
+        self.assertNotEqual(Path(observation['cwd']), self.page.current_path.parent)
+        self.assertEqual(observation['arguments'][-1], Path(run[0]).name)
+        self.assertTrue(observation['arguments'][-1].isascii())
+        self.assertEqual(launched.call_count, 1)
         self.assertIn('кодом 7', self.page.status.text())
 
     def test_compiler_and_run_receive_tool_path_without_changing_global_environment(self):

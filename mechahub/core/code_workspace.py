@@ -45,6 +45,21 @@ DEFAULT_PROFILES = (
 )
 
 
+def command_working_directory(profile: LanguageProfile, source: Path,
+                              run_command: list[str], phase: str) -> Path:
+    """Keep the built-in MinGW linker output relative to its Unicode-aware cwd.
+
+    Runtime and custom-language compilation keep the source directory. Compare
+    the complete profile so a user-defined C++ command is never rewritten.
+    """
+    profile = validate_profile(profile)
+    if phase not in {'compile', 'run'}:
+        raise CodeWorkspaceError('Невідомий етап виконання коду.')
+    if phase == 'compile' and profile == DEFAULT_PROFILES[1]:
+        return Path(run_command[0]).parent
+    return Path(source).parent
+
+
 def _executable(value: str | Path | None, *, python: bool = False) -> Path | None:
     if not value:
         return None
@@ -296,4 +311,9 @@ class CodeWorkspace:
         run_command = expand(profile.run)
         if compile_command is not None:
             output_folder.mkdir(parents=True, exist_ok=True)
+            if profile == DEFAULT_PROFILES[1]:
+                # Some MinGW ld builds convert their output argument through
+                # the Windows ANSI code page. Keep that argument ASCII, and
+                # let QProcess set the real output directory through UTF-16.
+                compile_command[-1] = output.name
         return compile_command, run_command
