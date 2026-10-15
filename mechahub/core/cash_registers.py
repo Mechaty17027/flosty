@@ -1,7 +1,7 @@
 """Small sourced hardware catalogue and local, user-written technical cases."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -12,8 +12,10 @@ import threading
 import unicodedata
 import uuid
 
+from mechahub.core.cash_registers_reference import IMAGE_REFERENCES, ISSUE_REFERENCES, MODEL_REFERENCES
 
-CHECKED_DATE = '2026-10-14'
+
+CHECKED_DATE = '2026-10-15'
 MANUFACTURERS = ('Unisystem', 'Exellio', 'ІКС', 'GERA / MG')
 
 
@@ -21,6 +23,23 @@ MANUFACTURERS = ('Unisystem', 'Exellio', 'ІКС', 'GERA / MG')
 class Source:
     title: str
     url: str
+
+
+@dataclass(frozen=True)
+class ProductImage:
+    filename: str
+    source: Source
+    credit: str
+
+
+@dataclass(frozen=True)
+class RegisterIssue:
+    title: str
+    meaning: str
+    checks: tuple[str, ...]
+    service: str
+    sources: tuple[Source, ...]
+    code: str = ''
 
 
 @dataclass(frozen=True)
@@ -34,10 +53,14 @@ class RegisterModel:
     sources: tuple[Source, ...]
     aliases: tuple[str, ...] = ()
     checked_date: str = CHECKED_DATE
+    image: ProductImage | None = None
+    issues: tuple[RegisterIssue, ...] = ()
+    issue_note: str = ''
+    reference_notes: tuple[str, ...] = ()
 
 
 # Short summaries of the linked official product tables; no sales rankings,
-# prices, registration eligibility or repair procedures are inferred here.
+# prices, registration eligibility or frequency rankings are inferred here.
 MODELS = (
     RegisterModel('mini-t400', 'Unisystem', 'MINI-T 400ME', 'Портативний касовий апарат',
                   'Виїзна торгівля та невеликі торгові точки.',
@@ -63,6 +86,15 @@ MODELS = (
                    ('Особливості', 'Дисплей покупця; 17 програмованих клавіш; акумулятор')),
                   (Source('Офіційна сторінка Unisystem', 'https://unisystem.ua/catalog/kassovye-apparaty/statsionarnyj-kassovyj-apparat-mini-t61-01/'),),
                   ('міні т61',)),
+    RegisterModel('mini-fp54', 'Unisystem', 'МІНІ-ФП54.01', 'Портативний фіскальний реєстратор',
+                  'Компактне касове місце з ПК, планшетом або торговельною системою.',
+                  (('Версія опису', '5401F3; звіряй версію ПЗ та комплектацію свого пристрою'),
+                   ('Стрічка', '58 мм; рулон до 40 мм; без автообрізувача'),
+                   ('Підключення до касової системи', 'RS-232, USB; Bluetooth — опція'),
+                   ('Мережа', 'Ethernet; GSM/GPRS залежно від комплектації'),
+                   ('Живлення та екран', 'Акумулятор Li-Pol 7,4 В, 2 А·год; дисплей покупця')),
+                  (Source('Офіційна сторінка Unisystem', 'https://unisystem.ua/catalog/fiskalnye-registratory/fiskalnyj-registrator-mini-fp54-01/'),),
+                  ('міні-фп54', 'мініфп54', 'mini-fp54', 'mini fp54', 'мини фп54')),
     RegisterModel('exellio-dp15', 'Exellio', 'Exellio DP-15', 'Портативний касовий апарат',
                   'Торгівля й послуги з автономним живленням.',
                   (('Стрічка', '57 мм за таблицею виробника; рулон до 40 мм'),
@@ -89,6 +121,16 @@ MODELS = (
                   (Source('Офіційна сторінка ІКС-МАРКЕТ', 'https://www.ics-market.com.ua/obladnannya/ikc-m510-01/'),
                    Source('Настанова IKC-М510.01, версія 1-04 (PDF)', 'https://www.ics-market.com.ua/wp-content/uploads/2026/04/IKC-M510.01_1-04_Nastanova.pdf')),
                   ('ікс маркет', 'ics', 'iks', 'IKC-M510.01', 'ІКС-М510.01')),
+    RegisterModel('iks-e810t', 'ІКС', 'IKC-E810T', 'Стаціонарний фіскальний реєстратор',
+                  'Друк чеків у складі касового місця магазину, закладу послуг або харчування.',
+                  (('Модифікація', 'E810T; настанова EP-12. Назва «ІКС-810» використовується в пошуку.'),
+                   ('Стрічка', '57,5 ± 0,5 або 79,5 ± 0,5 мм; рулон до 83 мм'),
+                   ('Друк', 'До 150 мм/с; автоматичний обрізувач'),
+                   ('Підключення', 'RS-232 і USB до ПК; Ethernet для передачі даних'),
+                   ('Живлення', 'Зовнішній блок 24 В; параметри звіряй за паспортом')),
+                  (Source('Офіційна сторінка ІКС-МАРКЕТ', 'https://www.ics-market.com.ua/e810t/'),
+                   Source('Настанова IKC-E810T, EP-12 (PDF)', 'https://www.ics-market.com.ua/wp-content/uploads/2026/06/IKC-E810T_Nastanova_EP-12.pdf')),
+                  ('ікс810', 'ікс 810', 'ікс-810', 'ікс е810т', 'IKC-Е810T', 'ІКС-Е810Т', 'iks810', 'ics810')),
     RegisterModel('mg-v545t02', 'GERA / MG', 'MG-V545T.02', 'Портативний касовий апарат',
                   'Торгівля та послуги; лінійка MG у каталозі GERA.',
                   (('Стрічка', '57,5 мм; рулон до 40 мм'),
@@ -108,6 +150,26 @@ MODELS = (
 )
 
 
+def _with_reference(model: RegisterModel) -> RegisterModel:
+    filename, url, credit = IMAGE_REFERENCES[model.key]
+    issues = tuple(RegisterIssue(
+        title=entry['title'], meaning=entry['meaning'], checks=tuple(entry['checks']),
+        service=entry['service'], sources=tuple(Source(*source) for source in entry['sources']),
+        code=entry.get('code', ''),
+    ) for entry in ISSUE_REFERENCES.get(model.key, ()))
+    reference = MODEL_REFERENCES.get(model.key, {})
+    sources = list(model.sources)
+    for title, source_url in reference.get('sources', ()):
+        if all(source.url != source_url for source in sources):
+            sources.append(Source(title, source_url))
+    return replace(model, image=ProductImage(filename, Source('Офіційне фото моделі', url), credit),
+                   issues=issues, sources=tuple(sources), issue_note=reference.get('issue_note', ''),
+                   reference_notes=tuple(reference.get('notes', ())))
+
+
+MODELS = tuple(_with_reference(model) for model in MODELS)
+
+
 def _search_text(value: str) -> str:
     value = unicodedata.normalize('NFKC', value).casefold()
     return re.sub(r'[^\w]+', ' ', value).strip()
@@ -122,7 +184,9 @@ def search_models(query: str = '', manufacturer: str = '') -> tuple[RegisterMode
             continue
         text = _search_text(' '.join((model.key, model.name, model.manufacturer, model.kind,
                                      model.purpose, *model.aliases,
-                                     *(value for _label, value in model.facts))))
+                                     *(value for _label, value in model.facts),
+                                     *(value for issue in model.issues for value in
+                                       (issue.title, issue.code, issue.meaning)))))
         if all(term in text for term in terms):
             matches.append(model)
     return tuple(matches)

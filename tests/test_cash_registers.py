@@ -1,4 +1,5 @@
 from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -29,7 +30,7 @@ class CatalogueTests(unittest.TestCase):
 
     def test_combined_search_and_brand_filter(self):
         found = search_models('ethernet', 'Unisystem')
-        self.assertEqual({model.name for model in found}, {'MINI-T 51.01', 'MINI-T 61.01'})
+        self.assertEqual({model.name for model in found}, {'MINI-T 51.01', 'MINI-T 61.01', 'МІНІ-ФП54.01'})
         self.assertFalse(search_models('ethernet', 'невідомий'))
         self.assertFalse(search_models('модель якої немає'))
 
@@ -40,6 +41,56 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(search_models('ІКС-М510')[0].key, 'iks-m510')
         self.assertEqual(search_models('MINI-T400')[0].key, 'mini-t400')
         self.assertTrue(all(model.manufacturer == 'GERA / MG' for model in search_models('гера')))
+
+    def test_requested_registrars_and_short_names_select_the_correct_modification(self):
+        for query, key in (('міні-фп54', 'mini-fp54'), ('мініфп54', 'mini-fp54'),
+                           ('mini fp54', 'mini-fp54'), ('ікс810', 'iks-e810t'),
+                           ('ІКС-Е810Т', 'iks-e810t'), ('IKC-E810T', 'iks-e810t')):
+            with self.subTest(query=query):
+                self.assertEqual([model.key for model in search_models(query)], [key])
+
+    def test_every_model_has_an_offline_photo_matching_its_official_source_and_hash(self):
+        folder = Path(__file__).resolve().parents[1] / 'assets' / 'cash_registers'
+        records = json.loads((folder / 'SOURCES.json').read_text(encoding='utf-8'))
+        metadata = {record['key']: record for record in records}
+        self.assertEqual(set(metadata), {model.key for model in MODELS})
+        for model in MODELS:
+            with self.subTest(model=model.key):
+                self.assertIsNotNone(model.image)
+                self.assertEqual(Path(model.image.filename).name, model.image.filename)
+                record = metadata[model.key]
+                self.assertEqual(model.image.source.url, record['url'])
+                self.assertEqual(model.image.filename, record['filename'])
+                payload = (folder / model.image.filename).read_bytes()
+                self.assertEqual(len(payload), record['bytes'])
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), record['sha256'])
+
+    def test_troubleshooting_is_sourced_scoped_and_searchable(self):
+        allowed = {'unisystem.ua', 'www.exellio.com.ua', 'www.ics-market.com.ua', 'gera.com.ua'}
+        for model in MODELS:
+            with self.subTest(model=model.key):
+                self.assertTrue(model.issue_note)
+                self.assertTrue(model.reference_notes)
+                self.assertGreaterEqual(len(model.issues), 3)
+                for issue in model.issues:
+                    self.assertTrue(issue.title and issue.meaning and issue.checks and issue.service)
+                    self.assertTrue(issue.sources)
+                    for source in issue.sources:
+                        parsed = urlsplit(source.url)
+                        self.assertEqual(parsed.scheme, 'https')
+                        self.assertIn(parsed.hostname, allowed)
+        self.assertEqual({model.key for model in search_models('x8B')}, {'mg-v545t02', 'mg-n707ts'})
+
+    def test_api_codes_and_initial_checks_cannot_be_confused_with_display_codes(self):
+        for model in MODELS:
+            if model.manufacturer == 'GERA / MG':
+                self.assertIn('API', model.issue_note)
+                self.assertTrue(all(issue.code.startswith('API: ') for issue in model.issues))
+            elif model.manufacturer == 'Exellio':
+                self.assertIn('Первинні перевірки', model.issue_note)
+                self.assertTrue(all(not issue.code for issue in model.issues))
+        e810 = next(model for model in MODELS if model.key == 'iks-e810t')
+        self.assertTrue(all(not issue.code for issue in e810.issues))
 
 
 class CaseStoreTests(unittest.TestCase):

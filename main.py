@@ -47,9 +47,11 @@ def main() -> int:
 
 
 def _self_check(app: QApplication, window: MainWindow) -> None:
-    """Exercise local browser HTML and bundled coding Python in isolated data."""
+    """Exercise bundled catalogue photos, browser HTML and coding Python."""
     import tempfile
     from PySide6.QtCore import QTimer, Qt
+    from mechahub.core.cash_registers import MODELS
+    from mechahub.ui.cash_registers_page import _model_image
     from mechahub.ui.programming_page import ProgrammingPage
     timer = QTimer(window)
     timer.setSingleShot(True)
@@ -107,6 +109,20 @@ def _self_check(app: QApplication, window: MainWindow) -> None:
         coding_timer.start()
 
     def begin():
+        # Exercise every image decoder in the actual packaged Qt runtime too
+        # (including WebP); a source-only asset check cannot verify its plugins.
+        catalogue = window.cash_registers_page
+        if catalogue.models.count() != len(MODELS):
+            finish(1)
+            return
+        for row, model in enumerate(MODELS):
+            if _model_image(model).isNull() or not model.issues:
+                finish(1)
+                return
+            catalogue.models.setCurrentRow(row)
+            if catalogue.detail_tabs.count() != 3 or catalogue.issue_selector.count() != len(model.issues):
+                finish(1)
+                return
         window._navigate(4)
         view = window.internet_page.new_tab(home=False)
         if view is None:

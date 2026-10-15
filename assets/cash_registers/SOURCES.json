@@ -1,0 +1,102 @@
+[
+  {
+    "key": "mini-t400",
+    "filename": "mini-t400.png",
+    "url": "https://unisystem.ua/wp-content/uploads/2021/01/mini-t400_12012021.png",
+    "checked_date": "2026-10-15",
+    "sha256": "361014803c8e3c01b955d2649a0cc626d6b1647720516b1f6ee79a1cc221aa25",
+    "bytes": 287016,
+    "width": 700,
+    "height": 700
+  },
+  {
+    "key": "mini-t51",
+    "filename": "mini-t51.jpg",
+    "url": "https://unisystem.ua/wp-content/uploads/2015/09/mini-t-51.01.jpg",
+    "checked_date": "2026-10-15",
+    "sha256": "9c02184043c7af9602d09472281867b691f1a52ebae46e0e01ba941e9bfb5389",
+    "bytes": 127138,
+    "width": 600,
+    "height": 600
+  },
+  {
+    "key": "mini-t61",
+    "filename": "mini-t61.jpg",
+    "url": "https://unisystem.ua/wp-content/uploads/2015/09/MINI-T61.015.jpg",
+    "checked_date": "2026-10-15",
+    "sha256": "ba5d1c96c71227286a6adf68117cc0eace102b8ba678bfbc907b30dd27745ece",
+    "bytes": 114016,
+    "width": 600,
+    "height": 600
+  },
+  {
+    "key": "mini-fp54",
+    "filename": "mini-fp54.jpg",
+    "url": "https://unisystem.ua/wp-content/uploads/2015/09/MINI-FP54.015.jpg",
+    "checked_date": "2026-10-15",
+    "sha256": "e3cde37aa98c255b947296394d65a676c23d747a1214c0f61c5ad4ca26c6c7b4",
+    "bytes": 86822,
+    "width": 600,
+    "height": 600
+  },
+  {
+    "key": "exellio-dp15",
+    "filename": "exellio-dp15.png",
+    "url": "https://www.exellio.com.ua/assets/cache/images/6c09b98eb7c32e631227974ebf219577.png",
+    "checked_date": "2026-10-15",
+    "sha256": "73243499b6af42aefcbedc594533475e4fd0074f5c5e2b5da384d08847ff6d2e",
+    "bytes": 99188,
+    "width": 350,
+    "height": 271
+  },
+  {
+    "key": "exellio-dp35",
+    "filename": "exellio-dp35.png",
+    "url": "https://www.exellio.com.ua/assets/cache/images/0c07170f4a395fbad5dbf391f602d729.png",
+    "checked_date": "2026-10-15",
+    "sha256": "65c3d56c4d5f0101d3165413d370b855027ec54d6866eaeb193887067a78b018",
+    "bytes": 101915,
+    "width": 350,
+    "height": 274
+  },
+  {
+    "key": "iks-m510",
+    "filename": "iks-m510.webp",
+    "url": "https://www.ics-market.com.ua/wp-content/uploads/2024/03/3098116425-1.webp",
+    "checked_date": "2026-10-15",
+    "sha256": "6ee03459dcdb3795265aa3cea4eee53dbb375e2eecba0d4711e5af0c6c641f17",
+    "bytes": 30006,
+    "width": 1000,
+    "height": 1000
+  },
+  {
+    "key": "iks-e810t",
+    "filename": "iks-e810t.png",
+    "url": "https://www.ics-market.com.ua/wp-content/uploads/2026/04/1.png",
+    "checked_date": "2026-10-15",
+    "sha256": "8ba78cc24f3e7e3aa7930059f521eae5449aeb749109877b6d581c904bd48d83",
+    "bytes": 211589,
+    "width": 662,
+    "height": 716
+  },
+  {
+    "key": "mg-v545t02",
+    "filename": "mg-v545t02.jpg",
+    "url": "https://gera.com.ua/images/detailed/3/kassoviy-apparat-mg-v545t.02.jpg",
+    "checked_date": "2026-10-15",
+    "sha256": "1f26265c12b3c7ed05d49cb70013675e290fe6498fa5a5cfa84cdc01b4ea7050",
+    "bytes": 154716,
+    "width": 886,
+    "height": 886
+  },
+  {
+    "key": "mg-n707ts",
+    "filename": "mg-n707ts.jpg",
+    "url": "https://gera.com.ua/images/detailed/3/fiskalniy-reestrator-mg-n-707-ts-01.jpg",
+    "checked_date": "2026-10-15",
+    "sha256": "ae33bfa8e85136cddf3c59fdac478541c024986766e00db256adcc471e48f735",
+    "bytes": 121264,
+    "width": 886,
+    "height": 886
+  }
+]
